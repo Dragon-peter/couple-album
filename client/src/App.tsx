@@ -108,6 +108,7 @@ function App() {
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [avatarPreview, setAvatarPreview] = useState('');
   const [previewImg, setPreviewImg] = useState<string | null>(null);
+  const [previewImgName, setPreviewImgName] = useState('');
 
   const authHeaders = useMemo(() => ({
     Authorization: `Bearer ${token}`,
@@ -438,6 +439,11 @@ function App() {
     setIsEditProfileModalOpen(true);
   };
 
+  const openImagePreview = (file: AlbumFile) => {
+    setPreviewImg(getFileUrl(file.url));
+    setPreviewImgName(file.originalname || 'album-photo');
+  };
+
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -615,7 +621,7 @@ function App() {
                   src={getFileUrl(file.url)}
                   alt={file.originalname}
                   className="album-photo"
-                  onClick={() => setPreviewImg(getFileUrl(file.url))}
+                  onClick={() => openImagePreview(file)}
                 />
               ))}
             </div>
@@ -648,7 +654,15 @@ function App() {
                   <h3 style={{ textAlign: 'center' }}>{album.title}</h3>
                   <div className={`album-photo-matrix matrix-count-${Math.min(album.files.length, 9)}`}>
                     {album.files.slice(0, 9).map(file => (
-                      <img key={file.url} src={getFileUrl(file.url)} alt={file.originalname} className="album-photo matrix" />
+                      <button
+                        type="button"
+                        key={file.url}
+                        className="album-photo-btn"
+                        onClick={() => openImagePreview(file)}
+                        aria-label={`查看图片 ${file.originalname}`}
+                      >
+                        <img src={getFileUrl(file.url)} alt={file.originalname} className="album-photo matrix" />
+                      </button>
                     ))}
                   </div>
                   <div className="album-description">{album.description}</div>
@@ -820,9 +834,11 @@ function App() {
       )}
 
       {previewImg && (
-        <div className="modal" onClick={() => setPreviewImg(null)}>
-          <img src={previewImg} className="modal-img" alt="" />
-          <a className="save-btn" href={previewImg} download onClick={e => e.stopPropagation()}>保存图片</a>
+        <div className="modal image-preview-modal" onClick={() => setPreviewImg(null)}>
+          <div className="image-preview-content" onClick={e => e.stopPropagation()}>
+            <img src={previewImg} className="modal-img" alt="" />
+            <a className="save-btn" href={previewImg} download={previewImgName || true}>保存图片</a>
+          </div>
         </div>
       )}
     </div>

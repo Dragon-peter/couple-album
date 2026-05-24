@@ -363,6 +363,22 @@ button[type="submit"],
   background: var(--soft-bg);
 }
 
+.album-photo-btn {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  cursor: zoom-in;
+  overflow: hidden;
+}
+
+.album-photo-btn:focus-visible {
+  outline: 3px solid rgba(255, 107, 129, 0.42);
+  outline-offset: 2px;
+}
+
 .album-photo-matrix.matrix-count-1 .album-photo.matrix {
   aspect-ratio: 4 / 3;
 }
@@ -770,19 +786,29 @@ button[type="submit"] {
   background: linear-gradient(135deg, #ffb6b9, #ffd6e0);
 }
 
+.image-preview-modal {
+  align-items: center;
+}
+
+.image-preview-content {
+  width: min(96vw, 1100px);
+  max-height: calc(100dvh - 32px);
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 12px;
+  justify-items: center;
+}
+
 .modal-img {
   display: block;
-  max-width: min(96vw, 1100px);
-  max-height: 82dvh;
+  max-width: 100%;
+  max-height: calc(100dvh - 104px);
   object-fit: contain;
   border-radius: 12px;
 }
 
 .save-btn {
-  position: fixed;
-  left: 50%;
-  bottom: 24px;
-  transform: translateX(-50%);
+  position: static;
   padding: 10px 18px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.94);
