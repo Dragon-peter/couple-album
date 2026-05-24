@@ -78,7 +78,13 @@ function buildMigration() {
     'DELETE FROM albums;',
     'DELETE FROM users;',
   ];
-  const uploads = ['#!/usr/bin/env bash', 'set -euo pipefail', 'BUCKET="${R2_BUCKET:-couple-album-uploads}"', ''];
+  const uploads = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'BUCKET="${R2_BUCKET:-couple-album-uploads}"',
+    'WRANGLER="${WRANGLER:-npx wrangler}"',
+    '',
+  ];
 
   users.forEach((user, index) => {
     const id = Number(user.id) || index + 1;
@@ -101,7 +107,7 @@ function buildMigration() {
       const url = r2Key ? `/uploads/${r2Key}` : file.url;
       sql.push(`INSERT INTO album_files (album_id, url, r2_key, originalname, type, mimetype, size, sort_order) VALUES (${albumId}, ${sqlString(url)}, ${sqlString(r2Key)}, ${sqlString(file.originalname || (upload && upload.filename) || '')}, ${sqlString(file.type || 'image')}, ${sqlString(file.mimetype || fileMime(file.originalname || (upload && upload.filename) || ''))}, ${sqlNumber(file.size || 0)}, ${fileIndex});`);
       if (upload && fs.existsSync(upload.localPath)) {
-        uploads.push(`wrangler r2 object put "$BUCKET/${upload.key}" --file ${JSON.stringify(upload.localPath)} --content-type ${JSON.stringify(fileMime(upload.filename, file.mimetype))}`);
+        uploads.push(`$WRANGLER r2 object put "$BUCKET/${upload.key}" --file ${JSON.stringify(upload.localPath)} --content-type ${JSON.stringify(fileMime(upload.filename, file.mimetype))}`);
       }
     });
 
