@@ -109,6 +109,8 @@ function App() {
   const [avatarPreview, setAvatarPreview] = useState('');
   const [previewImg, setPreviewImg] = useState<string | null>(null);
   const [previewImgName, setPreviewImgName] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
   const authHeaders = useMemo(() => ({
     Authorization: `Bearer ${token}`,
@@ -131,6 +133,15 @@ function App() {
     const freshAlbum = albums.find(album => album.id === selectedAlbum.id);
     if (freshAlbum) setSelectedAlbum(freshAlbum);
   }, [albums, selectedAlbum]);
+
+  useEffect(() => {
+    if (!previewImg) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeImagePreview();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [previewImg]);
 
   const fetchAlbums = async () => {
     try {
@@ -261,6 +272,7 @@ function App() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!requireLogin()) return;
+    if (isUploading) return;
     if (!files || files.length === 0) {
       alert('请选择文件');
       return;
@@ -273,13 +285,29 @@ function App() {
     formData.append('tags', JSON.stringify(tags));
     Array.from(files).forEach(file => formData.append('files', file));
 
+    setIsUploading(true);
+    setUploadProgress(0);
+
     try {
-      const response = await fetch(`${API_BASE_URL}/api/album`, {
-        method: 'POST',
-        headers: authHeaders,
-        body: formData,
+      const data = await new Promise<any>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `${API_BASE_URL}/api/album`);
+        xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        xhr.upload.onprogress = event => {
+          setUploadProgress(event.lengthComputable ? Math.round((event.loaded / event.total) * 100) : null);
+        };
+        xhr.onload = () => {
+          try {
+            const parsed = JSON.parse(xhr.responseText || '{}');
+            if (xhr.status === 401) handleAuthFailure(parsed.message);
+            resolve(parsed);
+          } catch (error) {
+            reject(error);
+          }
+        };
+        xhr.onerror = () => reject(new Error('上传失败'));
+        xhr.send(formData);
       });
-      const data = await parseApiResponse(response);
       if (data.success) {
         setTitle('');
         setDescription('');
@@ -288,6 +316,7 @@ function App() {
         setTags([]);
         setCreateCategory('日常');
         setShowCreateModal(false);
+        setUploadProgress(null);
         fetchAlbums();
       } else {
         alert(data.message || '创建相册失败');
@@ -295,6 +324,9 @@ function App() {
     } catch (error) {
       console.error('创建相册失败:', error);
       alert('创建相册失败，请重试');
+    } finally {
+      setIsUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -442,6 +474,11 @@ function App() {
   const openImagePreview = (file: AlbumFile) => {
     setPreviewImg(getFileUrl(file.url));
     setPreviewImgName(file.originalname || 'album-photo');
+  };
+
+  const closeImagePreview = () => {
+    setPreviewImg(null);
+    setPreviewImgName('');
   };
 
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -701,15 +738,15 @@ function App() {
               <form onSubmit={handleSubmit}>
                 <div className="form-group">
                   <label>相册标题：</label>
-                  <input type="text" value={title} onChange={e => setTitle(e.target.value)} placeholder="给这个美好的回忆起个名字吧~" required />
+                  <input type="text" value={title} onChange={e => setTitle(e.target.value)} placeholder="给这个美好的回忆起个名字吧~" required disabled={isUploading} />
                 </div>
                 <div className="form-group">
                   <label>相册描述：</label>
-                  <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="记录下这个瞬间的故事..." required />
+                  <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="记录下这个瞬间的故事..." required disabled={isUploading} />
                 </div>
                 <div className="form-group">
                   <label>分类：</label>
-                  <select value={createCategory} onChange={e => setCreateCategory(e.target.value)} required>
+                  <select value={createCategory} onChange={e => setCreateCategory(e.target.value)} required disabled={isUploading}>
                     {categories.filter(c => c !== '全部').map(category => (
                       <option key={category} value={category}>{category}</option>
                     ))}
@@ -723,6 +760,7 @@ function App() {
                       value={newTag}
                       onChange={e => setNewTag(e.target.value)}
                       placeholder="添加标签..."
+                      disabled={isUploading}
                       onKeyDown={e => {
                         if (e.key === 'Enter') {
                           e.preventDefault();
@@ -730,28 +768,36 @@ function App() {
                         }
                       }}
                     />
-                    <button type="button" onClick={handleAddTag}>添加</button>
+                    <button type="button" onClick={handleAddTag} disabled={isUploading}>添加</button>
                   </div>
                   <div className="tags-list">
                     {tags.map(tag => (
                       <span key={tag} className="tag">
                         {tag}
-                        <button type="button" onClick={() => setTags(tags.filter(item => item !== tag))}>&times;</button>
+                        <button type="button" onClick={() => setTags(tags.filter(item => item !== tag))} disabled={isUploading}>&times;</button>
                       </span>
                     ))}
                   </div>
                 </div>
                 <div className="form-group">
-                  <label className="file-upload-label" htmlFor="photo-upload">选择文件</label>
-                  <input id="photo-upload" type="file" multiple accept="image/*,video/*,.pdf,.doc,.docx" onChange={handleFileChange} required />
+                  <label className={`file-upload-label${isUploading ? ' disabled' : ''}`} htmlFor="photo-upload">选择文件</label>
+                  <input id="photo-upload" type="file" multiple accept="image/*,video/*,.pdf,.doc,.docx" onChange={handleFileChange} required disabled={isUploading} />
                   {previewUrls.length > 0 && (
                     <div className="preview-photos">
                       {previewUrls.map((url, index) => <img key={url} src={url} alt={`预览 ${index + 1}`} />)}
                     </div>
                   )}
                 </div>
-                <button type="submit">创建新回忆</button>
-                <button type="button" className="cancel-btn" onClick={() => setShowCreateModal(false)}>取消</button>
+                {isUploading && (
+                  <div className={`upload-progress${uploadProgress === null ? ' indeterminate' : ''}`} role="status" aria-live="polite">
+                    <div className="upload-progress-track">
+                      <div className="upload-progress-fill" style={{ width: uploadProgress === null ? undefined : `${uploadProgress}%` }} />
+                    </div>
+                    <span>{uploadProgress === null ? '上传中...' : `上传中 ${uploadProgress}%`}</span>
+                  </div>
+                )}
+                <button type="submit" disabled={isUploading}>{isUploading ? '上传中...' : '创建新回忆'}</button>
+                <button type="button" className="cancel-btn" onClick={() => setShowCreateModal(false)} disabled={isUploading}>取消</button>
               </form>
             </div>
           </div>
@@ -834,8 +880,11 @@ function App() {
       )}
 
       {previewImg && (
-        <div className="modal image-preview-modal" onClick={() => setPreviewImg(null)}>
+        <div className="modal image-preview-modal" onClick={closeImagePreview}>
           <div className="image-preview-content" onClick={e => e.stopPropagation()}>
+            <button className="image-preview-close" type="button" onClick={closeImagePreview} aria-label="关闭图片预览">
+              &times;
+            </button>
             <img src={previewImg} className="modal-img" alt="" />
             <a className="save-btn" href={previewImg} download={previewImgName || true}>保存图片</a>
           </div>
