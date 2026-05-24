@@ -54,6 +54,7 @@ function resolveApiBaseUrl(): string {
 
 const API_BASE_URL = resolveApiBaseUrl();
 const categories = ['全部', '旅行', '日常', '纪念日', '美食', '其他'];
+const mineCategory = '我的发布';
 
 const getFileUrl = (fileUrl?: string) => {
   if (!fileUrl) return '';
@@ -162,8 +163,8 @@ function App() {
     const account = loginAccount.trim();
     const password = loginPassword.trim();
 
-    if (!name || !account || !password) {
-      alert('请填写名字、账户和密码');
+    if (!account || !password || (loginMode === 'register' && !name)) {
+      alert(loginMode === 'login' ? '请填写账户和密码' : '请填写名字、账户和密码');
       return;
     }
 
@@ -171,7 +172,7 @@ function App() {
       const response = await fetch(`${API_BASE_URL}/api/${loginMode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, account, password }),
+        body: JSON.stringify(loginMode === 'login' ? { account, password } : { name, account, password }),
       });
       const data = await response.json();
       if (data.success) {
@@ -190,6 +191,7 @@ function App() {
     setToken('');
     localStorage.removeItem('user');
     localStorage.removeItem('token');
+    if (selectedCategory === mineCategory) setSelectedCategory('全部');
     setIsLoginModalOpen(true);
   };
 
@@ -479,7 +481,9 @@ function App() {
       || album.description.toLowerCase().includes(query)
       || (album.creator || '').toLowerCase().includes(query)
       || (album.tags || []).some(tag => tag.toLowerCase().includes(query));
-    const matchesCategory = selectedCategory === '全部' || album.category === selectedCategory;
+    const matchesCategory = selectedCategory === '全部'
+      || (selectedCategory === mineCategory && isAlbumOwner(album))
+      || album.category === selectedCategory;
     const matchesFavorite = !showFavoritesOnly || album.isFavorite;
     return matchesSearch && matchesCategory && matchesFavorite;
   });
@@ -553,7 +557,9 @@ function App() {
               注册
             </button>
           </div>
-          <input type="text" value={loginName} onChange={e => setLoginName(e.target.value)} placeholder="名字" />
+          {loginMode === 'register' && (
+            <input type="text" value={loginName} onChange={e => setLoginName(e.target.value)} placeholder="名字" />
+          )}
           <input type="text" value={loginAccount} onChange={e => setLoginAccount(e.target.value)} placeholder="账户" />
           <input
             type="password"
@@ -624,7 +630,7 @@ function App() {
               </button>
             </div>
             <div className="category-filter">
-              {categories.map(category => (
+              {[...categories.slice(0, 1), ...(user ? [mineCategory] : []), ...categories.slice(1)].map(category => (
                 <button key={category} className={selectedCategory === category ? 'active' : ''} onClick={() => setSelectedCategory(category)}>
                   {category}
                 </button>
@@ -634,7 +640,7 @@ function App() {
               {appMessage && <div className="empty-state">{appMessage}</div>}
               {!appMessage && filteredAlbums.length === 0 && (
                 <div className="empty-state">
-                  {searchTerm || selectedCategory !== '全部' || showFavoritesOnly ? '没有找到符合条件的相册' : '还没有相册，创建一个新回忆吧'}
+                  {selectedCategory === mineCategory ? '还没有你发布的相册' : searchTerm || selectedCategory !== '全部' || showFavoritesOnly ? '没有找到符合条件的相册' : '还没有相册，创建一个新回忆吧'}
                 </div>
               )}
               {filteredAlbums.map(album => (

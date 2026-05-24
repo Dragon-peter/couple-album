@@ -82,7 +82,9 @@ bash scripts/cloudflare-setup.sh
 
 ### 4. Cloudflare Pages 配置
 
-- GitHub 仓库：`zly136688/couple-album`
+- 正式访问地址：`https://drake-and-penny.pages.dev`
+- Cloudflare Pages 项目：`drake-and-penny`
+- GitHub 仓库：`Dragon-peter/couple-album`
 - 分支：`brand-new-version`
 - 构建命令：`cd client && npm ci && npm run build`
 - 输出目录：`client/build`

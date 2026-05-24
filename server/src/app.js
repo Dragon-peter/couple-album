@@ -203,20 +203,19 @@ function removeUploadedFile(fileUrl) {
 }
 
 app.post('/api/login', (req, res) => {
-  const name = normalizeText(req.body.name);
   const account = normalizeText(req.body.account || req.body.username);
   const password = normalizeText(req.body.password);
 
-  if (!name || !account || !password) {
-    return res.status(400).json({ success: false, message: '名字、账户和密码不能为空' });
+  if (!account || !password) {
+    return res.status(400).json({ success: false, message: '账户和密码不能为空' });
   }
 
-  const user = users.find(item => item.account === account && item.name === name);
+  const user = users.find(item => item.account === account);
   if (!user) {
-    return res.status(401).json({ success: false, message: '名字、账户或密码错误' });
+    return res.status(401).json({ success: false, message: '账户或密码错误' });
   }
   if (!verifyPassword(password, getStoredPassword(user))) {
-    return res.status(401).json({ success: false, message: '名字、账户或密码错误' });
+    return res.status(401).json({ success: false, message: '账户或密码错误' });
   }
 
   if (!user.passwordHash || !isPasswordHash(user.passwordHash)) {

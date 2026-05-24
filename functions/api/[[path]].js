@@ -238,14 +238,13 @@ function isAlbumOwner(album, user) {
 
 async function handleLogin(request, env) {
   const body = await request.json();
-  const name = normalizeText(body.name);
   const account = normalizeText(body.account || body.username);
   const password = normalizeText(body.password);
-  if (!name || !account || !password) return json({ success: false, message: '名字、账户和密码不能为空' }, 400);
+  if (!account || !password) return json({ success: false, message: '账户和密码不能为空' }, 400);
 
-  const user = await env.DB.prepare('SELECT * FROM users WHERE account = ? AND name = ?').bind(account, name).first();
+  const user = await env.DB.prepare('SELECT * FROM users WHERE account = ?').bind(account).first();
   if (!user || !(await verifyPassword(password, user.password_hash || user.password))) {
-    return json({ success: false, message: '名字、账户或密码错误' }, 401);
+    return json({ success: false, message: '账户或密码错误' }, 401);
   }
   if (!user.password_hash || !isPasswordHash(user.password_hash)) {
     await env.DB.prepare('UPDATE users SET password_hash = ?, password = NULL WHERE id = ?').bind(await hashPassword(password), user.id).run();
