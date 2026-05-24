@@ -2,6 +2,7 @@ const crypto = require('crypto');
 
 const TOKEN_SECRET = process.env.TOKEN_SECRET || 'couple-album-dev-secret-change-in-production';
 const PASSWORD_PREFIX = 'pbkdf2_sha256';
+const PBKDF2_ITERATIONS = 100000;
 
 function base64UrlEncode(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -52,8 +53,9 @@ function requireAuth(req, res, next) {
 }
 
 function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('base64url');
-  const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, 'sha256').toString('base64url');
+  const saltBytes = crypto.randomBytes(16);
+  const salt = saltBytes.toString('base64url');
+  const hash = crypto.pbkdf2Sync(String(password), saltBytes, PBKDF2_ITERATIONS, 32, 'sha256').toString('base64url');
   return `${PASSWORD_PREFIX}$${salt}$${hash}`;
 }
 
@@ -70,7 +72,7 @@ function verifyPassword(password, storedValue) {
   const [, salt, expectedHash] = stored.split('$');
   if (!salt || !expectedHash) return false;
 
-  const actualHash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, 'sha256').toString('base64url');
+  const actualHash = crypto.pbkdf2Sync(String(password), Buffer.from(salt, 'base64url'), PBKDF2_ITERATIONS, 32, 'sha256').toString('base64url');
   const expected = Buffer.from(expectedHash);
   const actual = Buffer.from(actualHash);
   return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);

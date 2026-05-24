@@ -1,4 +1,5 @@
 const PASSWORD_PREFIX = 'pbkdf2_sha256';
+const PBKDF2_ITERATIONS = 100000;
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_TOKEN_SECRET = 'couple-album-dev-secret-change-in-production';
 
@@ -81,7 +82,7 @@ async function hashPassword(password) {
     ['deriveBits'],
   );
   const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt, iterations: 120000, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
     material,
     256,
   );
@@ -106,7 +107,7 @@ async function verifyPassword(password, storedValue) {
     ['deriveBits'],
   );
   const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt: base64UrlDecode(saltEncoded), iterations: 120000, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt: base64UrlDecode(saltEncoded), iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
     material,
     256,
   );

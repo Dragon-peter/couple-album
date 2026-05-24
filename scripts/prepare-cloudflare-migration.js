@@ -9,6 +9,7 @@ const OUT_DIR = path.join(ROOT, 'cloudflare', 'generated');
 const USERS_PATH = path.join(ROOT, 'users.json');
 const ALBUMS_PATH = path.join(ROOT, 'albums.json');
 const UPLOADS_DIR = path.join(ROOT, 'server', 'uploads');
+const PBKDF2_ITERATIONS = 100000;
 
 function readJson(filePath, fallback) {
   if (!fs.existsSync(filePath)) return fallback;
@@ -39,8 +40,9 @@ function isPasswordHash(value) {
 function hashLegacyPassword(password) {
   if (!password) return '';
   if (isPasswordHash(password)) return password;
-  const salt = crypto.randomBytes(16).toString('base64url');
-  const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, 'sha256').toString('base64url');
+  const saltBytes = crypto.randomBytes(16);
+  const salt = saltBytes.toString('base64url');
+  const hash = crypto.pbkdf2Sync(String(password), saltBytes, PBKDF2_ITERATIONS, 32, 'sha256').toString('base64url');
   return `pbkdf2_sha256$${salt}$${hash}`;
 }
 
