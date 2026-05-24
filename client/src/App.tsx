@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import './App.css';
-import './mobile.css';
 
 interface AlbumFile {
   url: string;
@@ -45,15 +44,31 @@ interface User {
 
 type LoginMode = 'login' | 'register';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001';
+function resolveApiBaseUrl(): string {
+  const envUrl = process.env.REACT_APP_API_URL;
+  if (envUrl === 'SAME_ORIGIN') return '';
+  if (envUrl) return envUrl.replace(/\/$/, '');
+  if (typeof window !== 'undefined') return window.location.origin;
+  return 'http://localhost:3001';
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 const categories = ['全部', '旅行', '日常', '纪念日', '美食', '其他'];
 
 const getFileUrl = (fileUrl?: string) => {
   if (!fileUrl) return '';
   if (fileUrl.startsWith('http')) return fileUrl;
-  const baseUrl = API_BASE_URL.endsWith('/') ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
+  const baseUrl = (
+    API_BASE_URL ||
+    (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3001')
+  ).replace(/\/$/, '');
   const relativePath = fileUrl.startsWith('/') ? fileUrl : `/${fileUrl}`;
   return `${baseUrl}${relativePath}`;
+};
+
+const getDefaultAvatar = (name?: string) => {
+  const label = encodeURIComponent((name || '你').slice(0, 1));
+  return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="%23ffb6b9"/><stop offset="1" stop-color="%23ffd6e0"/></linearGradient></defs><rect width="96" height="96" rx="48" fill="url(%23g)"/><text x="48" y="58" text-anchor="middle" font-size="38" font-family="Arial, sans-serif" fill="white">${label}</text></svg>`;
 };
 
 function App() {
@@ -69,6 +84,8 @@ function App() {
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
   const [commentDrafts, setCommentDrafts] = useState<Record<number, string>>({});
+  const [expandedComments, setExpandedComments] = useState<Record<number, boolean>>({});
+  const [appMessage, setAppMessage] = useState('');
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState('');
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
@@ -119,9 +136,13 @@ function App() {
       const data = await response.json();
       if (data.success) {
         setAlbums(data.albums);
+        setAppMessage('');
+      } else {
+        setAppMessage(data.message || '相册加载失败');
       }
     } catch (error) {
       console.error('获取相册失败:', error);
+      setAppMessage('服务器连接失败，请确认后端服务已启动');
     }
   };
 
@@ -177,6 +198,23 @@ function App() {
     alert('请先登录');
     setIsLoginModalOpen(true);
     return false;
+  };
+
+  const handleAuthFailure = (message?: string) => {
+    setUser(null);
+    setToken('');
+    localStorage.removeItem('user');
+    localStorage.removeItem('token');
+    setIsLoginModalOpen(true);
+    alert(message || '登录已过期，请重新登录');
+  };
+
+  const parseApiResponse = async (response: Response) => {
+    const data = await response.json();
+    if (response.status === 401) {
+      handleAuthFailure(data.message);
+    }
+    return data;
   };
 
   const isAlbumOwner = (album: Album) => {
@@ -238,7 +276,7 @@ function App() {
         headers: authHeaders,
         body: formData,
       });
-      const data = await response.json();
+      const data = await parseApiResponse(response);
       if (data.success) {
         setTitle('');
         setDescription('');
@@ -264,7 +302,7 @@ function App() {
         method: 'POST',
         headers: authHeaders,
       });
-      const data = await response.json();
+      const data = await parseApiResponse(response);
       if (data.success) fetchAlbums();
       else alert(data.message || '更新收藏状态失败');
     } catch (error) {
@@ -289,7 +327,7 @@ function App() {
         },
         body: JSON.stringify({ content }),
       });
-      const data = await response.json();
+      const data = await parseApiResponse(response);
       if (data.success) {
         setCommentDrafts(current => ({ ...current, [albumId]: '' }));
         fetchAlbums();
@@ -311,7 +349,7 @@ function App() {
         method: 'DELETE',
         headers: authHeaders,
       });
-      const data = await response.json();
+      const data = await parseApiResponse(response);
       if (data.success) fetchAlbums();
       else alert(data.message || '删除评论失败');
     } catch (error) {
@@ -333,7 +371,7 @@ function App() {
         method: 'DELETE',
         headers: authHeaders,
       });
-      const data = await response.json();
+      const data = await parseApiResponse(response);
       if (data.success) {
         if (selectedAlbum?.id === album.id) setSelectedAlbum(null);
         fetchAlbums();
@@ -376,7 +414,7 @@ function App() {
           tags: editTags,
         }),
       });
-      const data = await response.json();
+      const data = await parseApiResponse(response);
       if (data.success) {
         setEditingAlbum(null);
         fetchAlbums();
@@ -420,7 +458,7 @@ function App() {
         headers: authHeaders,
         body: formData,
       });
-      const data = await response.json();
+      const data = await parseApiResponse(response);
       if (data.success) {
         setUser(data.user);
         localStorage.setItem('user', JSON.stringify(data.user));
@@ -446,46 +484,59 @@ function App() {
     return matchesSearch && matchesCategory && matchesFavorite;
   });
 
-  const renderComments = (album: Album) => (
-    <div className="comment-section card-comment-section">
+  const renderComments = (album: Album, compact = false) => (
+    <div className={`comment-section card-comment-section${compact ? ' compact' : ''}`}>
       <h4>评论 ({album.comments.length})</h4>
-      <div className="comment-list">
-        {album.comments.map(comment => (
-          <div key={comment.id} className="comment-item">
-            <div className="comment-meta">
-              <span className="comment-username">{comment.username}</span>
-              {canDeleteComment(album, comment) && (
-                <button className="comment-delete-btn" onClick={() => handleDeleteComment(album.id, comment.id)}>
-                  删除
-                </button>
-              )}
-            </div>
-            <div className="comment-content-row">
-              <span className="comment-content">{comment.content}</span>
-              <span className="comment-time">
-                {new Date(comment.createdAt).toLocaleString('zh-CN', {
-                  year: '2-digit',
-                  month: '2-digit',
-                  day: '2-digit',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
-              </span>
-            </div>
+      {(!compact || expandedComments[album.id]) && (
+        <>
+          <div className="comment-list">
+            {album.comments.length === 0 && <div className="empty-comments">还没有评论</div>}
+            {album.comments.map(comment => (
+              <div key={comment.id} className="comment-item">
+                <div className="comment-meta">
+                  <span className="comment-username">{comment.username}</span>
+                  {canDeleteComment(album, comment) && (
+                    <button className="comment-delete-btn" onClick={() => handleDeleteComment(album.id, comment.id)}>
+                      删除
+                    </button>
+                  )}
+                </div>
+                <div className="comment-content-row">
+                  <span className="comment-content">{comment.content}</span>
+                  <span className="comment-time">
+                    {new Date(comment.createdAt).toLocaleString('zh-CN', {
+                      year: '2-digit',
+                      month: '2-digit',
+                      day: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-      <div className="comment-input-row">
-        <textarea
-          value={commentDrafts[album.id] || ''}
-          onChange={e => setCommentDrafts(current => ({ ...current, [album.id]: e.target.value }))}
-          placeholder="写下你的评论..."
-          className="comment-input"
-        />
-        <button className="button comment-btn" onClick={() => handleAddComment(album.id)}>
-          发表
+          <div className="comment-input-row">
+            <textarea
+              value={commentDrafts[album.id] || ''}
+              onChange={e => setCommentDrafts(current => ({ ...current, [album.id]: e.target.value }))}
+              placeholder="写下你的评论..."
+              className="comment-input"
+            />
+            <button className="button comment-btn" onClick={() => handleAddComment(album.id)}>
+              发表
+            </button>
+          </div>
+        </>
+      )}
+      {compact && (
+        <button
+          className="comment-toggle-btn"
+          onClick={() => setExpandedComments(current => ({ ...current, [album.id]: !current[album.id] }))}
+        >
+          {expandedComments[album.id] ? '收起评论' : album.comments.length ? `查看 ${album.comments.length} 条评论` : '写评论'}
         </button>
-      </div>
+      )}
     </div>
   );
 
@@ -525,7 +576,7 @@ function App() {
           <h1>我们的照片墙</h1>
           {user && (
             <div className="user-info">
-              <img className="user-avatar" src={getFileUrl(user.avatarUrl) || undefined} alt="" />
+              <img className="user-avatar" src={getFileUrl(user.avatarUrl) || getDefaultAvatar(user.name)} alt="" />
               <div className="user-summary">
                 <span>{user.name}</span>
                 <small>{user.account}</small>
@@ -537,7 +588,6 @@ function App() {
         </div>
         <div className="search-bar">
           <input type="text" placeholder="搜索相册..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
-          <button className="search-btn">搜索</button>
           <button className="create-memory-btn" onClick={() => setShowCreateModal(true)}>
             + 创建新回忆
           </button>
@@ -581,6 +631,12 @@ function App() {
               ))}
             </div>
             <div className="albums-grid">
+              {appMessage && <div className="empty-state">{appMessage}</div>}
+              {!appMessage && filteredAlbums.length === 0 && (
+                <div className="empty-state">
+                  {searchTerm || selectedCategory !== '全部' || showFavoritesOnly ? '没有找到符合条件的相册' : '还没有相册，创建一个新回忆吧'}
+                </div>
+              )}
               {filteredAlbums.map(album => (
                 <div key={album.id} className="album-card" style={{ cursor: 'default' }}>
                   <h3 style={{ textAlign: 'center' }}>{album.title}</h3>
@@ -589,8 +645,8 @@ function App() {
                       <img key={file.url} src={getFileUrl(file.url)} alt={file.originalname} className="album-photo matrix" />
                     ))}
                   </div>
-                  <div style={{ textAlign: 'center', marginTop: 8, color: '#888' }}>{album.description}</div>
-                  <div style={{ textAlign: 'center', fontSize: '12px', color: '#666', marginTop: 4 }}>
+                  <div className="album-description">{album.description}</div>
+                  <div className="album-meta">
                     创建者: {album.creator} · 创建于 {new Date(album.createdAt).toLocaleString('zh-CN', {
                       year: 'numeric',
                       month: '2-digit',
@@ -611,7 +667,7 @@ function App() {
                       </>
                     )}
                   </div>
-                  {renderComments(album)}
+                  {renderComments(album, true)}
                 </div>
               ))}
             </div>
@@ -742,7 +798,7 @@ function App() {
             <h2>编辑个人信息</h2>
             <form onSubmit={handleProfileSubmit}>
               <div className="profile-avatar-edit">
-                <img src={avatarPreview} alt="" />
+                <img src={avatarPreview || getDefaultAvatar(editName || user?.name)} alt="" />
                 <label className="file-upload-label" htmlFor="avatar-upload">更换头像</label>
                 <input id="avatar-upload" type="file" accept="image/*" onChange={handleAvatarChange} />
               </div>

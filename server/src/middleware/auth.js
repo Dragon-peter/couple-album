@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 
 const TOKEN_SECRET = process.env.TOKEN_SECRET || 'couple-album-dev-secret-change-in-production';
+const PASSWORD_PREFIX = 'pbkdf2_sha256';
 
 function base64UrlEncode(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -50,4 +51,29 @@ function requireAuth(req, res, next) {
   next();
 }
 
-module.exports = { signToken, requireAuth };
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('base64url');
+  const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, 'sha256').toString('base64url');
+  return `${PASSWORD_PREFIX}$${salt}$${hash}`;
+}
+
+function isPasswordHash(value) {
+  return String(value || '').startsWith(`${PASSWORD_PREFIX}$`);
+}
+
+function verifyPassword(password, storedValue) {
+  const stored = String(storedValue || '');
+  if (!isPasswordHash(stored)) {
+    return stored === String(password);
+  }
+
+  const [, salt, expectedHash] = stored.split('$');
+  if (!salt || !expectedHash) return false;
+
+  const actualHash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, 'sha256').toString('base64url');
+  const expected = Buffer.from(expectedHash);
+  const actual = Buffer.from(actualHash);
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+module.exports = { signToken, requireAuth, hashPassword, isPasswordHash, verifyPassword, TOKEN_SECRET };

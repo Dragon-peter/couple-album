@@ -1,0 +1,15 @@
+name = "couple-album"
+compatibility_date = "2026-05-25"
+pages_build_output_dir = "client/build"
+
+[vars]
+TOKEN_SECRET = "replace-this-in-cloudflare-dashboard"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "couple-album-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "UPLOADS"
+bucket_name = "couple-album-uploads"

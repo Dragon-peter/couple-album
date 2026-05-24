@@ -3,7 +3,7 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { signToken, requireAuth } = require('./middleware/auth');
+const { signToken, requireAuth, hashPassword, isPasswordHash, verifyPassword, TOKEN_SECRET } = require('./middleware/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -99,6 +99,10 @@ function publicUser(user) {
   };
 }
 
+function getStoredPassword(user) {
+  return user.passwordHash || user.password || '';
+}
+
 function normalizeUsers(rawUsers) {
   return rawUsers.map((user, index) => ({
     id: user.id || index + 1,
@@ -106,6 +110,7 @@ function normalizeUsers(rawUsers) {
     account: user.account || user.username || `user${index + 1}`,
     username: user.account || user.username || `user${index + 1}`,
     password: user.password || '',
+    passwordHash: user.passwordHash || (isPasswordHash(user.password) ? user.password : ''),
     avatarUrl: user.avatarUrl || '',
     bio: user.bio || '',
   }));
@@ -132,6 +137,7 @@ function normalizeAlbums(rawAlbums) {
 
 let users = normalizeUsers(readJson(usersDataPath, [{ id: 1, name: 'user1', account: 'user1', username: 'user1', password: 'password1' }]));
 let albums = normalizeAlbums(readJson(albumsDataPath, []));
+repairLegacyAlbumOwnership();
 
 function saveUsers() {
   writeJson(usersDataPath, users);
@@ -152,6 +158,42 @@ function isAlbumOwner(album, user) {
     || (!album.creatorId && !album.creatorAccount && album.creator === user.name);
 }
 
+function findUserByDisplayIdentity(displayName) {
+  const name = normalizeText(displayName);
+  if (!name || name === 'unknown') return null;
+  return users.find(user => user.account === name || user.username === name || user.name === name) || null;
+}
+
+function repairLegacyAlbumOwnership() {
+  let changed = false;
+
+  albums.forEach(album => {
+    if (!album.creatorId || !album.creatorAccount) {
+      const owner = findUserByDisplayIdentity(album.creator);
+      if (owner) {
+        album.creator = owner.name;
+        album.creatorId = owner.id;
+        album.creatorAccount = owner.account;
+        changed = true;
+      }
+    }
+
+    (album.comments || []).forEach(comment => {
+      if (!comment.userId || !comment.account) {
+        const author = findUserByDisplayIdentity(comment.username);
+        if (author) {
+          comment.username = author.name;
+          comment.userId = author.id;
+          comment.account = author.account;
+          changed = true;
+        }
+      }
+    });
+  });
+
+  if (changed) saveAlbums();
+}
+
 function removeUploadedFile(fileUrl) {
   if (!fileUrl || !fileUrl.startsWith('/uploads/')) return;
   const filePath = path.join(uploadDir, path.basename(fileUrl));
@@ -169,9 +211,18 @@ app.post('/api/login', (req, res) => {
     return res.status(400).json({ success: false, message: '名字、账户和密码不能为空' });
   }
 
-  const user = users.find(item => item.account === account && item.password === password && item.name === name);
+  const user = users.find(item => item.account === account && item.name === name);
   if (!user) {
     return res.status(401).json({ success: false, message: '名字、账户或密码错误' });
+  }
+  if (!verifyPassword(password, getStoredPassword(user))) {
+    return res.status(401).json({ success: false, message: '名字、账户或密码错误' });
+  }
+
+  if (!user.passwordHash || !isPasswordHash(user.passwordHash)) {
+    user.passwordHash = hashPassword(password);
+    delete user.password;
+    saveUsers();
   }
 
   res.json({ success: true, user: publicUser(user), token: signToken(user) });
@@ -194,7 +245,7 @@ app.post('/api/register', (req, res) => {
     name,
     account,
     username: account,
-    password,
+    passwordHash: hashPassword(password),
     avatarUrl: '',
     bio: '',
   };
@@ -408,4 +459,7 @@ app.use((err, _req, res, _next) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`后端服务已启动: http://localhost:${PORT}`);
   console.log(`上传目录: ${uploadDir}`);
+  if (TOKEN_SECRET === 'couple-album-dev-secret-change-in-production') {
+    console.warn('警告: 当前使用默认 TOKEN_SECRET。本机开发可用，生产/公网部署请设置强随机 TOKEN_SECRET。');
+  }
 });
