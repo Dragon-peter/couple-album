@@ -32,16 +32,21 @@ elif [ "$D1_STATUS" -ne 0 ]; then
 fi
 
 echo "==> 创建或复用 R2 bucket: $R2_BUCKET"
-npx wrangler r2 bucket create "$R2_BUCKET" || true
+if ! npx wrangler r2 bucket create "$R2_BUCKET"; then
+  echo ""
+  echo "R2 bucket 创建失败。请先在 Cloudflare Dashboard 启用 R2，然后重新运行本脚本。"
+  echo "D1 database_id 已尽量写入 wrangler.toml，本次停止以避免半迁移。"
+  exit 1
+fi
 
 echo "==> 初始化 D1 schema"
-npx wrangler d1 execute "$DB_NAME" --file=cloudflare/migrations/0001_schema.sql
+npx wrangler d1 execute "$DB_NAME" --remote --file=cloudflare/migrations/0001_schema.sql
 
 echo "==> 生成 JSON/R2 迁移文件"
 node scripts/prepare-cloudflare-migration.js
 
 echo "==> 导入 JSON 数据到 D1"
-npx wrangler d1 execute "$DB_NAME" --file=cloudflare/generated/seed.sql
+npx wrangler d1 execute "$DB_NAME" --remote --file=cloudflare/generated/seed.sql
 
 echo "==> 上传本地 server/uploads 图片到 R2"
 R2_BUCKET="$R2_BUCKET" bash cloudflare/generated/upload-r2.sh

@@ -8,7 +8,7 @@ TOKEN_SECRET = "replace-this-in-cloudflare-dashboard"
 [[d1_databases]]
 binding = "DB"
 database_name = "couple-album-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "2487fac6-7276-4478-9f8f-6e4bcb901a10"
 
 [[r2_buckets]]
 binding = "UPLOADS"

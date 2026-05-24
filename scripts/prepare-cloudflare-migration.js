@@ -21,6 +21,7 @@ function sqlString(value) {
 }
 
 function sqlNumber(value) {
+  if (value === null || value === undefined || value === '') return 'NULL';
   const number = Number(value);
   return Number.isFinite(number) ? String(number) : 'NULL';
 }
@@ -69,6 +70,7 @@ function buildMigration() {
   const albums = readJson(ALBUMS_PATH, []);
   const userByName = new Map(users.map((user) => [user.name || user.username, user]));
   const userByAccount = new Map(users.map((user) => [user.account || user.username, user]));
+  let nextCommentId = 1;
   const sql = [
     'PRAGMA foreign_keys = OFF;',
     'DELETE FROM comments;',
@@ -103,9 +105,10 @@ function buildMigration() {
       }
     });
 
-    (album.comments || []).forEach((comment, commentIndex) => {
+    (album.comments || []).forEach((comment) => {
       const owner = userByAccount.get(comment.account) || userByName.get(comment.username) || null;
-      const commentId = Number(comment.id) || Number(`${albumId}${String(commentIndex + 1).padStart(3, '0')}`);
+      const commentId = nextCommentId;
+      nextCommentId += 1;
       sql.push(`INSERT INTO comments (id, album_id, content, username, user_id, account, created_at) VALUES (${commentId}, ${albumId}, ${sqlString(comment.content)}, ${sqlString(comment.username || '')}, ${sqlNumber(comment.userId || comment.user_id || (owner && owner.id))}, ${sqlString(comment.account || (owner && (owner.account || owner.username)) || '')}, ${sqlString(normalizeDate(comment.createdAt || comment.created_at))});`);
     });
   });
