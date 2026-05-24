@@ -74,6 +74,12 @@ bash cloudflare/generated/upload-r2.sh
 
 生成目录 `cloudflare/generated/` 默认不提交到 Git。无法识别作者的旧 `unknown` 相册会保留数据，但线上权限会按只读处理。
 
+也可以在完成 `wrangler login` 后运行一键脚本：
+
+```bash
+bash scripts/cloudflare-setup.sh
+```
+
 ### 4. Cloudflare Pages 配置
 
 - GitHub 仓库：`zly136688/couple-album`
