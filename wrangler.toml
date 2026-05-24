@@ -2,9 +2,6 @@ name = "couple-album"
 compatibility_date = "2026-05-24"
 pages_build_output_dir = "client/build"
 
-[vars]
-TOKEN_SECRET = "replace-this-in-cloudflare-dashboard"
-
 [[d1_databases]]
 binding = "DB"
 database_name = "couple-album-db"
