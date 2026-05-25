@@ -827,6 +827,49 @@ input[type="file"] {
   height: 100%;
 }
 
+.live-thumb {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: #111;
+}
+
+.live-thumb img,
+.live-thumb video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.live-thumb video {
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.album-photo-btn:hover .live-thumb video,
+.detail-media-btn:hover .live-thumb video,
+.edit-media-preview:hover .live-thumb video,
+.album-photo-btn:focus-visible .live-thumb video,
+.detail-media-btn:focus-visible .live-thumb video {
+  opacity: 1;
+}
+
+.live-badge {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(18, 24, 38, 0.74);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
 .video-thumb img,
 .video-thumb video {
   width: 100%;
@@ -861,6 +904,12 @@ input[type="file"] {
   font-weight: 800;
   text-align: center;
   overflow-wrap: anywhere;
+}
+
+.live-pair-hint {
+  margin: 6px 0 10px;
+  color: #7a5360;
+  font-size: 13px;
 }
 
 .upload-progress {
@@ -1121,6 +1170,13 @@ button[type="submit"] {
   color: var(--primary-color);
   text-decoration: none;
   font-weight: 700;
+}
+
+.preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
 }
 
 .hide-header {

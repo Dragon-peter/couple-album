@@ -5,6 +5,9 @@ interface AlbumFile {
   id?: number | string;
   url: string;
   coverUrl?: string;
+  isLive?: boolean;
+  liveVideoUrl?: string;
+  liveType?: string;
   originalname: string;
   type: string;
   mimetype: string;
@@ -55,6 +58,10 @@ type MediaItem = {
   previewUrl: string;
   coverPreviewUrl?: string;
   coverFile?: File;
+  isLive?: boolean;
+  liveVideoPreviewUrl?: string;
+  liveVideoFile?: File;
+  liveType?: string;
   originalname: string;
   type: string;
 };
@@ -62,6 +69,8 @@ type PreviewFile = {
   url: string;
   type: string;
   name: string;
+  isLive?: boolean;
+  liveVideoUrl?: string;
 };
 
 const MAX_ALBUM_FILES = 9;
@@ -269,8 +278,19 @@ function App() {
     return isCommentOwner || isAlbumOwner(album);
   };
 
+  const getFileExtension = (name: string) => name.toLowerCase().split('.').pop() || '';
+  const getFileStem = (name: string) => name.replace(/\.[^.]+$/, '').toLowerCase();
+  const isImageFile = (file: File) => (
+    file.type.startsWith('image/')
+    || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif'].includes(getFileExtension(file.name))
+  );
+  const isVideoFile = (file: File) => (
+    file.type.startsWith('video/')
+    || ['mov', 'mp4', 'm4v', 'webm', 'ogg'].includes(getFileExtension(file.name))
+  );
+
   const getMediaType = (file: File) => (
-    file.type.startsWith('video/') ? 'video' : file.type.startsWith('image/') ? 'image' : 'document'
+    isVideoFile(file) ? 'video' : isImageFile(file) ? 'image' : 'document'
   );
 
   const captureVideoCover = (file: File): Promise<File | null> => new Promise(resolve => {
@@ -324,24 +344,60 @@ function App() {
     };
   });
 
-  const buildNewMediaItems = async (selectedFiles: File[]): Promise<MediaItem[]> => Promise.all(
-    selectedFiles.map(async (file, index) => {
-      const clientId = `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
+  const createMediaItemFromFile = async (
+    file: File,
+    index: number,
+    liveVideoFile?: File,
+  ): Promise<MediaItem> => {
+    const clientId = `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
       const type = getMediaType(file);
-      const coverFile = type === 'video' ? await captureVideoCover(file) : null;
+      const coverFile = type === 'video' && !liveVideoFile ? await captureVideoCover(file) : null;
       return {
         key: `new-${clientId}`,
-        source: 'new' as const,
+        source: 'new',
         clientId,
         file,
         previewUrl: URL.createObjectURL(file),
         coverFile: coverFile || undefined,
         coverPreviewUrl: coverFile ? URL.createObjectURL(coverFile) : '',
+        isLive: Boolean(liveVideoFile),
+        liveVideoFile,
+        liveVideoPreviewUrl: liveVideoFile ? URL.createObjectURL(liveVideoFile) : '',
+        liveType: liveVideoFile ? 'apple-live-photo-pair' : '',
         originalname: file.name,
         type,
       };
-    }),
-  );
+  };
+
+  const buildNewMediaItems = async (selectedFiles: File[]): Promise<MediaItem[]> => {
+    const grouped = new Map<string, { images: File[]; videos: File[]; others: File[] }>();
+    selectedFiles.forEach(file => {
+      const stem = getFileStem(file.name);
+      const group = grouped.get(stem) || { images: [], videos: [], others: [] };
+      if (isImageFile(file)) group.images.push(file);
+      else if (isVideoFile(file)) group.videos.push(file);
+      else group.others.push(file);
+      grouped.set(stem, group);
+    });
+
+    const orderedFiles: Array<{ file: File; liveVideoFile?: File }> = [];
+    grouped.forEach(group => {
+      const [firstImage, ...extraImages] = group.images;
+      const [firstVideo, ...extraVideos] = group.videos;
+      if (firstImage && firstVideo) {
+        orderedFiles.push({ file: firstImage, liveVideoFile: firstVideo });
+      } else if (firstImage) {
+        orderedFiles.push({ file: firstImage });
+      } else if (firstVideo) {
+        orderedFiles.push({ file: firstVideo });
+      }
+      extraImages.forEach(file => orderedFiles.push({ file }));
+      extraVideos.forEach(file => orderedFiles.push({ file }));
+      group.others.forEach(file => orderedFiles.push({ file }));
+    });
+
+    return Promise.all(orderedFiles.map((item, index) => createMediaItemFromFile(item.file, index, item.liveVideoFile)));
+  };
 
   const addMediaFiles = async (
     e: React.ChangeEvent<HTMLInputElement>,
@@ -356,11 +412,11 @@ function App() {
       e.target.value = '';
       return;
     }
-    if (selectedFiles.length > availableSlots) {
+    const nextItems = await buildNewMediaItems(selectedFiles);
+    if (nextItems.length > availableSlots) {
       alert(`最多还能添加 ${availableSlots} 个文件`);
     }
-    const nextItems = await buildNewMediaItems(selectedFiles.slice(0, availableSlots));
-    setItems(current => [...current, ...nextItems]);
+    setItems(current => [...current, ...nextItems.slice(0, availableSlots)]);
     e.target.value = '';
   };
 
@@ -445,6 +501,10 @@ function App() {
       if (item.type === 'video' && item.coverFile && item.clientId) {
         formData.append('coverClientIds', item.clientId);
         formData.append('newCovers', item.coverFile);
+      }
+      if (item.isLive && item.liveVideoFile && item.clientId) {
+        formData.append('liveClientIds', item.clientId);
+        formData.append('liveVideos', item.liveVideoFile);
       }
     });
 
@@ -597,6 +657,9 @@ function App() {
       id: file.id,
       previewUrl: getFileUrl(file.url),
       coverPreviewUrl: getFileUrl(file.coverUrl),
+      isLive: Boolean(file.isLive || file.liveVideoUrl),
+      liveVideoPreviewUrl: getFileUrl(file.liveVideoUrl),
+      liveType: file.liveType || '',
       originalname: file.originalname || `媒体 ${index + 1}`,
       type: file.type || (file.mimetype || '').split('/')[0] || 'image',
     })));
@@ -647,6 +710,17 @@ function App() {
           formData.append('newCovers', item.coverFile);
         }
       });
+      editMediaItems.forEach(item => {
+        if (!item.isLive || !item.liveVideoFile) return;
+        if (item.source === 'existing' && item.id) {
+          formData.append('liveExistingIds', String(item.id));
+          formData.append('existingLiveVideos', item.liveVideoFile);
+        }
+        if (item.source === 'new' && item.clientId) {
+          formData.append('liveClientIds', item.clientId);
+          formData.append('liveVideos', item.liveVideoFile);
+        }
+      });
 
       const response = await fetch(`${API_BASE_URL}/api/album/${editingAlbum.id}`, {
         method: 'PUT',
@@ -681,6 +755,8 @@ function App() {
       url: getFileUrl(file.url),
       type: file.type || (file.mimetype || '').split('/')[0] || 'image',
       name: file.originalname || 'album-photo',
+      isLive: Boolean(file.isLive || file.liveVideoUrl),
+      liveVideoUrl: getFileUrl(file.liveVideoUrl),
     });
   };
 
@@ -688,7 +764,16 @@ function App() {
     setPreviewFile(null);
   };
 
-  const renderMediaPreview = (url: string, type: string, name: string, coverUrl = '') => {
+  const renderMediaPreview = (url: string, type: string, name: string, coverUrl = '', liveVideoUrl = '', isLive = false) => {
+    if (isLive && liveVideoUrl) {
+      return (
+        <div className="live-thumb">
+          <img src={url} alt={name} />
+          <video src={liveVideoUrl} muted loop playsInline preload="metadata" autoPlay />
+          <span className="live-badge">LIVE</span>
+        </div>
+      );
+    }
     const displayUrl = type === 'video' && coverUrl ? coverUrl : url;
     if (type === 'video') {
       return (
@@ -730,7 +815,7 @@ function App() {
             onDragEnd={() => setDraggedIndex(null)}
           >
             <div className="edit-media-preview">
-              {renderMediaPreview(item.previewUrl, item.type, item.originalname, item.coverPreviewUrl)}
+              {renderMediaPreview(item.previewUrl, item.type, item.originalname, item.coverPreviewUrl, item.liveVideoPreviewUrl, item.isLive)}
             </div>
             {!disabled && (
               <>
@@ -769,7 +854,7 @@ function App() {
           </label>
         )}
       </div>
-      <input id={inputId} type="file" multiple accept="image/*,video/*,.pdf,.doc,.docx" onChange={onFilesChange} disabled={disabled} />
+      <input id={inputId} type="file" multiple accept="image/*,video/*,.heic,.heif,.mov,.pdf,.doc,.docx" onChange={onFilesChange} disabled={disabled} />
     </>
   );
 
@@ -950,9 +1035,9 @@ function App() {
                   key={file.url}
                   className="album-photo detail-media-btn"
                   onClick={() => openImagePreview(file)}
-                  aria-label={`查看${file.type === 'video' ? '视频' : '图片'} ${file.originalname}`}
+                  aria-label={`查看${file.isLive ? 'Live 图' : file.type === 'video' ? '视频' : '图片'} ${file.originalname}`}
                 >
-                  {renderMediaPreview(getFileUrl(file.url), file.type, file.originalname, getFileUrl(file.coverUrl))}
+                  {renderMediaPreview(getFileUrl(file.url), file.type, file.originalname, getFileUrl(file.coverUrl), getFileUrl(file.liveVideoUrl), Boolean(file.isLive || file.liveVideoUrl))}
                 </button>
               ))}
             </div>
@@ -990,10 +1075,10 @@ function App() {
                         key={file.url}
                         className="album-photo-btn"
                         onClick={() => openImagePreview(file)}
-                        aria-label={`查看${file.type === 'video' ? '视频' : '图片'} ${file.originalname}`}
+                        aria-label={`查看${file.isLive ? 'Live 图' : file.type === 'video' ? '视频' : '图片'} ${file.originalname}`}
                       >
                         <span className="album-photo matrix">
-                          {renderMediaPreview(getFileUrl(file.url), file.type, file.originalname, getFileUrl(file.coverUrl))}
+                          {renderMediaPreview(getFileUrl(file.url), file.type, file.originalname, getFileUrl(file.coverUrl), getFileUrl(file.liveVideoUrl), Boolean(file.isLive || file.liveVideoUrl))}
                         </span>
                       </button>
                     ))}
@@ -1080,6 +1165,9 @@ function App() {
                     <label>相册文件：</label>
                     <span>{createMediaItems.length}/{MAX_ALBUM_FILES}</span>
                   </div>
+                  {createMediaItems.some(item => item.isLive) && (
+                    <p className="live-pair-hint">已自动配对 {createMediaItems.filter(item => item.isLive).length} 个 Live 图</p>
+                  )}
                   {createMediaItems.length === 0 && (
                     <label className={`file-upload-label upload-card${isUploading ? ' disabled' : ''}`} htmlFor="photo-upload">
                       <span className="upload-card-icon">+</span>
@@ -1101,7 +1189,7 @@ function App() {
                       id="photo-upload"
                       type="file"
                       multiple
-                      accept="image/*,video/*,.pdf,.doc,.docx"
+                      accept="image/*,video/*,.heic,.heif,.mov,.pdf,.doc,.docx"
                       onChange={event => { void addMediaFiles(event, createMediaItems.length, setCreateMediaItems); }}
                       disabled={isUploading}
                     />
@@ -1175,6 +1263,9 @@ function App() {
                   <label>相册文件：</label>
                   <span>{editMediaItems.length}/{MAX_ALBUM_FILES}</span>
                 </div>
+                {editMediaItems.some(item => item.isLive) && (
+                  <p className="live-pair-hint">已识别 {editMediaItems.filter(item => item.isLive).length} 个 Live 图</p>
+                )}
                 {renderMediaGrid(
                   editMediaItems,
                   setEditMediaItems,
@@ -1220,14 +1311,23 @@ function App() {
             <button className="image-preview-close" type="button" onClick={closeImagePreview} aria-label="关闭图片预览">
               &times;
             </button>
-            {previewFile.type === 'video' ? (
+            {previewFile.isLive && previewFile.liveVideoUrl ? (
+              <video src={previewFile.liveVideoUrl} className="modal-img modal-video" controls playsInline poster={previewFile.url} />
+            ) : previewFile.type === 'video' ? (
               <video src={previewFile.url} className="modal-img modal-video" controls playsInline />
             ) : (
               <img src={previewFile.url} className="modal-img" alt="" />
             )}
-            <a className="save-btn" href={previewFile.url} download={previewFile.name || true}>
-              {previewFile.type === 'video' ? '保存视频' : '保存图片'}
-            </a>
+            <div className="preview-actions">
+              <a className="save-btn" href={previewFile.url} download={previewFile.name || true}>
+                {previewFile.type === 'video' ? '保存视频' : '保存图片'}
+              </a>
+              {previewFile.isLive && previewFile.liveVideoUrl && (
+                <a className="save-btn" href={previewFile.liveVideoUrl} download={`${previewFile.name.replace(/\.[^.]+$/, '')}-live.mov`}>
+                  保存 Live 视频
+                </a>
+              )}
+            </div>
           </div>
         </div>
       )}

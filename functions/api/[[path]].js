@@ -143,10 +143,16 @@ async function requireUser(request, env) {
   return user;
 }
 
-function getFileType(mimetype) {
-  if (mimetype.startsWith('image/')) return 'image';
-  if (mimetype.startsWith('video/')) return 'video';
-  if (mimetype.startsWith('application/')) return 'document';
+function getFileExtension(name) {
+  const match = String(name || '').toLowerCase().match(/\.[^.]+$/);
+  return match ? match[0] : '';
+}
+
+function getFileType(mimetype, filename = '') {
+  const ext = getFileExtension(filename);
+  if (mimetype.startsWith('image/') || ['.heic', '.heif', '.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) return 'image';
+  if (mimetype.startsWith('video/') || ['.mov', '.mp4', '.m4v', '.webm', '.ogg'].includes(ext)) return 'video';
+  if (mimetype.startsWith('application/') || ['.pdf', '.doc', '.docx'].includes(ext)) return 'document';
   return 'other';
 }
 
@@ -214,6 +220,9 @@ function mapAlbumRows(rows) {
         id: row.file_id,
         url: row.file_url,
         coverUrl: row.file_cover_url || '',
+        isLive: Boolean(row.file_live_video_url),
+        liveVideoUrl: row.file_live_video_url || '',
+        liveType: row.file_live_type || '',
         originalname: row.file_originalname,
         type: row.file_type,
         mimetype: row.file_mimetype,
@@ -246,6 +255,7 @@ async function listAlbums(env) {
       f.id AS file_id, f.url AS file_url, f.originalname AS file_originalname,
       f.type AS file_type, f.mimetype AS file_mimetype, f.size AS file_size,
       f.sort_order AS file_sort_order, f.cover_url AS file_cover_url,
+      f.live_video_url AS file_live_video_url, f.live_type AS file_live_type,
       c.id AS comment_id, c.content AS comment_content, c.username AS comment_username,
       c.user_id AS comment_user_id, c.account AS comment_account, c.created_at AS comment_created_at
     FROM albums a
@@ -347,6 +357,7 @@ async function handleAlbumCreate(request, env) {
   const hasMediaOrder = Array.isArray(mediaOrder) && mediaOrder.length > 0;
   const fileByClientId = formFilesByKey(form, 'files', 'fileClientIds');
   const coverByClientId = formFilesByKey(form, 'newCovers', 'coverClientIds');
+  const liveVideoByClientId = formFilesByKey(form, 'liveVideos', 'liveClientIds');
   const orderedItems = hasMediaOrder ? mediaOrder : files.map((file, index) => ({ source: 'new', clientId: `legacy-${index}`, file }));
   if (orderedItems.length !== files.length || orderedItems.length > MAX_ALBUM_FILES) {
     return json({ success: false, message: `最多只能上传 ${MAX_ALBUM_FILES} 个文件` }, 400);
@@ -362,6 +373,11 @@ async function handleAlbumCreate(request, env) {
       usedCreateClientIds.add(clientId);
     }
   }
+  for (const liveClientId of liveVideoByClientId.keys()) {
+    if (!usedCreateClientIds.has(liveClientId)) {
+      return json({ success: false, message: 'Live 图数据无效' }, 400);
+    }
+  }
 
   const createdAt = nowIso();
   const result = await env.DB.prepare(`
@@ -375,12 +391,15 @@ async function handleAlbumCreate(request, env) {
     const file = hasMediaOrder ? fileByClientId.get(String(item.clientId || '')) : item.file;
     if (!file) return json({ success: false, message: '新增文件数据无效' }, 400);
     const uploaded = await uploadR2File(env, file, `albums/${albumId}`, index);
-    const cover = hasMediaOrder ? coverByClientId.get(String(item.clientId || '')) : null;
+    const clientId = String(item.clientId || '');
+    const cover = hasMediaOrder ? coverByClientId.get(clientId) : null;
+    const liveVideo = hasMediaOrder ? liveVideoByClientId.get(clientId) : null;
     const uploadedCover = cover ? await uploadR2File(env, cover, `album-covers/${albumId}`, index) : { key: '', url: '' };
+    const uploadedLiveVideo = liveVideo ? await uploadR2File(env, liveVideo, `album-live/${albumId}`, index) : { key: '', url: '' };
     await env.DB.prepare(`
-      INSERT INTO album_files (album_id, url, r2_key, cover_url, cover_r2_key, originalname, type, mimetype, size, sort_order)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(albumId, uploaded.url, uploaded.key, uploadedCover.url, uploadedCover.key, file.name || uploaded.key, getFileType(file.type || ''), file.type || '', file.size || 0, index).run();
+      INSERT INTO album_files (album_id, url, r2_key, cover_url, cover_r2_key, live_video_url, live_video_r2_key, live_type, originalname, type, mimetype, size, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(albumId, uploaded.url, uploaded.key, uploadedCover.url, uploadedCover.key, uploadedLiveVideo.url, uploadedLiveVideo.key, uploadedLiveVideo.url ? 'apple-live-photo-pair' : '', file.name || uploaded.key, getFileType(file.type || '', file.name || ''), file.type || '', file.size || 0, index).run();
   }
 
   const albums = await listAlbums(env);
@@ -416,6 +435,8 @@ async function handleAlbumUpdate(request, env, albumId) {
     const newFileByClientId = new Map(newFiles.map((file, index) => [newClientIds[index], file]));
     const coverByClientId = formFilesByKey(body, 'newCovers', 'coverClientIds');
     const coverByExistingId = formFilesByKey(body, 'existingCovers', 'coverExistingIds');
+    const liveVideoByClientId = formFilesByKey(body, 'liveVideos', 'liveClientIds');
+    const liveVideoByExistingId = formFilesByKey(body, 'existingLiveVideos', 'liveExistingIds');
     const keptExistingIds = new Set();
     const usedNewClientIds = new Set();
 
@@ -433,12 +454,19 @@ async function handleAlbumUpdate(request, env, albumId) {
       }
     }
     if (usedNewClientIds.size !== newFiles.length) return json({ success: false, message: '新增文件数据无效' }, 400);
+    for (const liveClientId of liveVideoByClientId.keys()) {
+      if (!usedNewClientIds.has(liveClientId)) return json({ success: false, message: 'Live 图数据无效' }, 400);
+    }
+    for (const liveExistingId of liveVideoByExistingId.keys()) {
+      if (!keptExistingIds.has(liveExistingId)) return json({ success: false, message: 'Live 图数据无效' }, 400);
+    }
 
     for (let index = 0; index < mediaOrder.length; index += 1) {
       const item = mediaOrder[index];
       if (item.source === 'existing') {
         const currentFile = currentById.get(String(item.id));
         const cover = coverByExistingId.get(String(item.id));
+        const liveVideo = liveVideoByExistingId.get(String(item.id));
         if (cover) {
           const uploadedCover = await uploadR2File(env, cover, `album-covers/${albumId}`, index);
           await env.DB.prepare('UPDATE album_files SET sort_order = ?, cover_url = ?, cover_r2_key = ? WHERE id = ? AND album_id = ?')
@@ -447,20 +475,35 @@ async function handleAlbumUpdate(request, env, albumId) {
           if (currentFile.cover_r2_key) {
             env.UPLOADS.delete(currentFile.cover_r2_key).catch((error) => console.error('删除旧封面失败:', error));
           }
+        } else if (liveVideo) {
+          await env.DB.prepare('UPDATE album_files SET sort_order = ? WHERE id = ? AND album_id = ?')
+            .bind(index, item.id, albumId)
+            .run();
         } else {
         await env.DB.prepare('UPDATE album_files SET sort_order = ? WHERE id = ? AND album_id = ?')
           .bind(index, item.id, albumId)
           .run();
         }
+        if (liveVideo) {
+          const uploadedLiveVideo = await uploadR2File(env, liveVideo, `album-live/${albumId}`, index);
+          await env.DB.prepare('UPDATE album_files SET live_video_url = ?, live_video_r2_key = ?, live_type = ? WHERE id = ? AND album_id = ?')
+            .bind(uploadedLiveVideo.url, uploadedLiveVideo.key, 'apple-live-photo-pair', item.id, albumId)
+            .run();
+          if (currentFile.live_video_r2_key) {
+            env.UPLOADS.delete(currentFile.live_video_r2_key).catch((error) => console.error('删除旧 Live 视频失败:', error));
+          }
+        }
       } else {
         const file = newFileByClientId.get(String(item.clientId));
         const uploaded = await uploadR2File(env, file, `albums/${albumId}`, index);
         const cover = coverByClientId.get(String(item.clientId));
+        const liveVideo = liveVideoByClientId.get(String(item.clientId));
         const uploadedCover = cover ? await uploadR2File(env, cover, `album-covers/${albumId}`, index) : { key: '', url: '' };
+        const uploadedLiveVideo = liveVideo ? await uploadR2File(env, liveVideo, `album-live/${albumId}`, index) : { key: '', url: '' };
         await env.DB.prepare(`
-          INSERT INTO album_files (album_id, url, r2_key, cover_url, cover_r2_key, originalname, type, mimetype, size, sort_order)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).bind(albumId, uploaded.url, uploaded.key, uploadedCover.url, uploadedCover.key, file.name || uploaded.key, getFileType(file.type || ''), file.type || '', file.size || 0, index).run();
+          INSERT INTO album_files (album_id, url, r2_key, cover_url, cover_r2_key, live_video_url, live_video_r2_key, live_type, originalname, type, mimetype, size, sort_order)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(albumId, uploaded.url, uploaded.key, uploadedCover.url, uploadedCover.key, uploadedLiveVideo.url, uploadedLiveVideo.key, uploadedLiveVideo.url ? 'apple-live-photo-pair' : '', file.name || uploaded.key, getFileType(file.type || '', file.name || ''), file.type || '', file.size || 0, index).run();
       }
     }
 
@@ -469,7 +512,7 @@ async function handleAlbumUpdate(request, env, albumId) {
       await env.DB.prepare(`DELETE FROM album_files WHERE album_id = ? AND id IN (${removedFiles.map(() => '?').join(',')})`)
         .bind(albumId, ...removedFiles.map((file) => file.id))
         .run();
-      await Promise.all(removedFiles.flatMap((file) => [file.r2_key, file.cover_r2_key]).filter(Boolean).map((key) => (
+      await Promise.all(removedFiles.flatMap((file) => [file.r2_key, file.cover_r2_key, file.live_video_r2_key]).filter(Boolean).map((key) => (
         env.UPLOADS.delete(key).catch((error) => console.error('删除 R2 文件失败:', error))
       )));
     }
@@ -489,8 +532,8 @@ async function handleAlbumDelete(request, env, albumId) {
   if (!album) return json({ success: false, message: '相册不存在' }, 404);
   if (!isAlbumOwner(album, user)) return json({ success: false, message: '只能删除自己发布的相册' }, 403);
 
-  const { results } = await env.DB.prepare('SELECT r2_key, cover_r2_key FROM album_files WHERE album_id = ?').bind(albumId).all();
-  await Promise.all((results || []).flatMap((file) => [file.r2_key, file.cover_r2_key]).filter(Boolean).map((key) => env.UPLOADS.delete(key)));
+  const { results } = await env.DB.prepare('SELECT r2_key, cover_r2_key, live_video_r2_key FROM album_files WHERE album_id = ?').bind(albumId).all();
+  await Promise.all((results || []).flatMap((file) => [file.r2_key, file.cover_r2_key, file.live_video_r2_key]).filter(Boolean).map((key) => env.UPLOADS.delete(key)));
   await env.DB.prepare('DELETE FROM albums WHERE id = ?').bind(albumId).run();
   return json({ success: true });
 }

@@ -32,19 +32,25 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase();
     const allowedTypes = [
       'image/jpeg',
       'image/png',
       'image/gif',
       'image/webp',
+      'image/heic',
+      'image/heif',
       'video/mp4',
+      'video/quicktime',
       'video/webm',
       'video/ogg',
       'application/pdf',
       'application/msword',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     ];
-    cb(allowedTypes.includes(file.mimetype) ? null : new Error('不支持的文件类型'), allowedTypes.includes(file.mimetype));
+    const allowedExtensions = ['.heic', '.heif', '.mov', '.mp4', '.m4v', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.doc', '.docx'];
+    const isAllowed = allowedTypes.includes(file.mimetype) || allowedExtensions.includes(ext);
+    cb(isAllowed ? null : new Error('不支持的文件类型'), isAllowed);
   },
   limits: { fileSize: 100 * 1024 * 1024 },
 });
@@ -53,6 +59,8 @@ const albumUpload = upload.fields([
   { name: 'files', maxCount: MAX_ALBUM_FILES },
   { name: 'newCovers', maxCount: MAX_ALBUM_FILES },
   { name: 'existingCovers', maxCount: MAX_ALBUM_FILES },
+  { name: 'liveVideos', maxCount: MAX_ALBUM_FILES },
+  { name: 'existingLiveVideos', maxCount: MAX_ALBUM_FILES },
 ]);
 
 const avatarUpload = multer({
@@ -79,10 +87,11 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 
-function getFileType(mimetype) {
-  if (mimetype.startsWith('image/')) return 'image';
-  if (mimetype.startsWith('video/')) return 'video';
-  if (mimetype.startsWith('application/')) return 'document';
+function getFileType(mimetype, filename = '') {
+  const ext = path.extname(filename).toLowerCase();
+  if (mimetype.startsWith('image/') || ['.heic', '.heif', '.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) return 'image';
+  if (mimetype.startsWith('video/') || ['.mov', '.mp4', '.m4v', '.webm', '.ogg'].includes(ext)) return 'video';
+  if (mimetype.startsWith('application/') || ['.pdf', '.doc', '.docx'].includes(ext)) return 'document';
   return 'other';
 }
 
@@ -131,6 +140,9 @@ function normalizeAlbums(rawAlbums) {
       ...file,
       id: file.id || fileIndex + 1,
       coverUrl: file.coverUrl || '',
+      isLive: Boolean(file.isLive || file.liveVideoUrl),
+      liveVideoUrl: file.liveVideoUrl || '',
+      liveType: file.liveType || '',
       sortOrder: Number.isFinite(Number(file.sortOrder)) ? Number(file.sortOrder) : fileIndex,
     })),
     creator: album.creator || album.creatorName || 'unknown',
@@ -237,13 +249,16 @@ function filesByKey(req, fileField, keyField) {
   return new Map(files.map((file, index) => [keys[index], file]));
 }
 
-function uploadedFileToAlbumFile(file, id, sortOrder, coverFile) {
+function uploadedFileToAlbumFile(file, id, sortOrder, coverFile, liveVideoFile) {
   return {
     id,
     url: `/uploads/${file.filename}`,
     coverUrl: coverFile ? `/uploads/${coverFile.filename}` : '',
+    isLive: Boolean(liveVideoFile),
+    liveVideoUrl: liveVideoFile ? `/uploads/${liveVideoFile.filename}` : '',
+    liveType: liveVideoFile ? 'apple-live-photo-pair' : '',
     originalname: file.originalname,
-    type: getFileType(file.mimetype),
+    type: getFileType(file.mimetype, file.originalname),
     mimetype: file.mimetype,
     size: file.size,
     sortOrder,
@@ -368,30 +383,36 @@ app.post('/api/album', requireAuth, albumUpload, (req, res) => {
   const hasMediaOrder = Array.isArray(mediaOrder) && mediaOrder.length > 0;
   const fileByClientId = filesByKey(req, 'files', 'fileClientIds');
   const coverByClientId = filesByKey(req, 'newCovers', 'coverClientIds');
+  const liveVideoByClientId = filesByKey(req, 'liveVideos', 'liveClientIds');
+  const cleanupAlbumUploads = () => {
+    ['files', 'newCovers', 'existingCovers', 'liveVideos', 'existingLiveVideos'].forEach(field => {
+      albumUploadedFiles(req, field).forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+    });
+  };
   const orderedItems = hasMediaOrder ? mediaOrder : uploadedFiles.map((file, index) => ({ source: 'new', clientId: `legacy-${index}`, file }));
   if (orderedItems.length !== uploadedFiles.length || orderedItems.length > MAX_ALBUM_FILES) {
-    albumUploadedFiles(req, 'files').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
-    albumUploadedFiles(req, 'newCovers').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
-    albumUploadedFiles(req, 'existingCovers').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+    cleanupAlbumUploads();
     return res.status(400).json({ success: false, message: `最多只能上传 ${MAX_ALBUM_FILES} 个文件` });
   }
   const usedCreateClientIds = new Set();
   for (const item of orderedItems) {
     if (!item || item.source !== 'new') {
-      albumUploadedFiles(req, 'files').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
-      albumUploadedFiles(req, 'newCovers').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
-      albumUploadedFiles(req, 'existingCovers').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+      cleanupAlbumUploads();
       return res.status(400).json({ success: false, message: '新增文件数据无效' });
     }
     if (hasMediaOrder) {
       const clientId = String(item.clientId || '');
       if (!fileByClientId.has(clientId) || usedCreateClientIds.has(clientId)) {
-        albumUploadedFiles(req, 'files').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
-        albumUploadedFiles(req, 'newCovers').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
-        albumUploadedFiles(req, 'existingCovers').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+        cleanupAlbumUploads();
         return res.status(400).json({ success: false, message: '新增文件数据无效' });
       }
       usedCreateClientIds.add(clientId);
+    }
+  }
+  for (const liveClientId of liveVideoByClientId.keys()) {
+    if (!usedCreateClientIds.has(liveClientId)) {
+      cleanupAlbumUploads();
+      return res.status(400).json({ success: false, message: 'Live 图数据无效' });
     }
   }
 
@@ -400,13 +421,13 @@ app.post('/api/album', requireAuth, albumUpload, (req, res) => {
     const item = orderedItems[index];
     const file = hasMediaOrder ? fileByClientId.get(String(item.clientId || '')) : item.file;
     if (!file) {
-      albumUploadedFiles(req, 'files').forEach(uploaded => removeUploadedFile(`/uploads/${uploaded.filename}`));
-      albumUploadedFiles(req, 'newCovers').forEach(uploaded => removeUploadedFile(`/uploads/${uploaded.filename}`));
-      albumUploadedFiles(req, 'existingCovers').forEach(uploaded => removeUploadedFile(`/uploads/${uploaded.filename}`));
+      cleanupAlbumUploads();
       return res.status(400).json({ success: false, message: '新增文件数据无效' });
     }
-    const coverFile = hasMediaOrder ? coverByClientId.get(String(item.clientId || '')) : null;
-    files.push(uploadedFileToAlbumFile(file, index + 1, index, coverFile));
+    const clientId = String(item.clientId || '');
+    const coverFile = hasMediaOrder ? coverByClientId.get(clientId) : null;
+    const liveVideoFile = hasMediaOrder ? liveVideoByClientId.get(clientId) : null;
+    files.push(uploadedFileToAlbumFile(file, index + 1, index, coverFile, liveVideoFile));
   }
 
   const album = {
@@ -503,6 +524,7 @@ app.delete('/api/album/:id', requireAuth, (req, res) => {
   album.files.forEach(file => {
     removeUploadedFile(file.url);
     removeUploadedFile(file.coverUrl);
+    removeUploadedFile(file.liveVideoUrl);
   });
   albums.splice(albumIndex, 1);
   saveAlbums();
@@ -529,9 +551,9 @@ app.put('/api/album/:id', requireAuth, albumUpload, (req, res) => {
   if (req.body.mediaOrder) {
     const mediaOrder = parseJsonField(req.body.mediaOrder, []);
     const cleanupUploads = () => {
-      albumUploadedFiles(req, 'files').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
-      albumUploadedFiles(req, 'newCovers').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
-      albumUploadedFiles(req, 'existingCovers').forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+      ['files', 'newCovers', 'existingCovers', 'liveVideos', 'existingLiveVideos'].forEach(field => {
+        albumUploadedFiles(req, field).forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+      });
     };
     if (!Array.isArray(mediaOrder)) {
       cleanupUploads();
@@ -556,6 +578,8 @@ app.put('/api/album/:id', requireAuth, albumUpload, (req, res) => {
     const newFileByClientId = new Map(newUploads.map((file, index) => [clientIds[index], file]));
     const coverByClientId = filesByKey(req, 'newCovers', 'coverClientIds');
     const coverByExistingId = filesByKey(req, 'existingCovers', 'coverExistingIds');
+    const liveVideoByClientId = filesByKey(req, 'liveVideos', 'liveClientIds');
+    const liveVideoByExistingId = filesByKey(req, 'existingLiveVideos', 'liveExistingIds');
     const keptExistingIds = new Set();
     const usedNewClientIds = new Set();
     const nextFiles = [];
@@ -570,10 +594,15 @@ app.put('/api/album/:id', requireAuth, albumUpload, (req, res) => {
         }
         keptExistingIds.add(id);
         const coverFile = coverByExistingId.get(id);
+        const liveVideoFile = liveVideoByExistingId.get(id);
         if (coverFile) removeUploadedFile(existingFile.coverUrl);
+        if (liveVideoFile) removeUploadedFile(existingFile.liveVideoUrl);
         nextFiles.push({
           ...existingFile,
           coverUrl: coverFile ? `/uploads/${coverFile.filename}` : existingFile.coverUrl || '',
+          isLive: liveVideoFile ? true : Boolean(existingFile.isLive || existingFile.liveVideoUrl),
+          liveVideoUrl: liveVideoFile ? `/uploads/${liveVideoFile.filename}` : existingFile.liveVideoUrl || '',
+          liveType: liveVideoFile ? 'apple-live-photo-pair' : existingFile.liveType || '',
           sortOrder: index,
         });
       } else if (item && item.source === 'new') {
@@ -589,6 +618,7 @@ app.put('/api/album/:id', requireAuth, albumUpload, (req, res) => {
           nextId([...album.files, ...nextFiles]),
           index,
           coverByClientId.get(clientId),
+          liveVideoByClientId.get(clientId),
         ));
       } else {
         cleanupUploads();
@@ -599,6 +629,18 @@ app.put('/api/album/:id', requireAuth, albumUpload, (req, res) => {
       cleanupUploads();
       return res.status(400).json({ success: false, message: '新增文件数据无效' });
     }
+    for (const liveClientId of liveVideoByClientId.keys()) {
+      if (!usedNewClientIds.has(liveClientId)) {
+        cleanupUploads();
+        return res.status(400).json({ success: false, message: 'Live 图数据无效' });
+      }
+    }
+    for (const liveExistingId of liveVideoByExistingId.keys()) {
+      if (!keptExistingIds.has(liveExistingId)) {
+        cleanupUploads();
+        return res.status(400).json({ success: false, message: 'Live 图数据无效' });
+      }
+    }
 
     (album.files || [])
       .filter(file => !keptExistingIds.has(String(file.id)))
@@ -606,6 +648,7 @@ app.put('/api/album/:id', requireAuth, albumUpload, (req, res) => {
         try {
           removeUploadedFile(file.url);
           removeUploadedFile(file.coverUrl);
+          removeUploadedFile(file.liveVideoUrl);
         } catch (error) {
           console.error('删除本地文件失败:', error);
         }
