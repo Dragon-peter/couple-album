@@ -229,6 +229,7 @@ select:disabled {
 .card-action-btn,
 .modal-buttons button,
 .edit-actions button,
+.create-actions button,
 button[type="submit"],
 .tags-input button,
 .login-content button,
@@ -262,6 +263,7 @@ button[type="submit"],
 .comment-btn,
 .card-action-btn,
 .edit-actions button[type="submit"],
+.create-actions button[type="submit"],
 .modal-buttons button[type="submit"] {
   background: linear-gradient(90deg, #ff8fa0, #ffb6b9);
   color: #fff;
@@ -737,6 +739,37 @@ button[type="submit"],
   font-weight: 700;
 }
 
+.upload-card {
+  width: 100%;
+  min-height: 96px;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px;
+  border: 1px dashed #ff8fa0;
+  background: #fff7fa;
+  color: #d94262;
+  text-align: center;
+  box-shadow: inset 0 0 0 1px rgba(255, 143, 160, 0.08);
+}
+
+.upload-card-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 50%;
+  background: #ff8fa0;
+  color: #fff;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.upload-card small {
+  color: var(--muted-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .file-upload-label.disabled {
   cursor: not-allowed;
   opacity: 0.62;
@@ -748,16 +781,40 @@ input[type="file"] {
 
 .preview-photos {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin-top: 12px;
 }
 
-.preview-photos img {
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  object-fit: cover;
+.preview-tile,
+.edit-media-preview {
+  overflow: hidden;
   border-radius: 10px;
+  background: #fff1f5;
+  aspect-ratio: 1 / 1;
+}
+
+.preview-tile img,
+.preview-tile video,
+.edit-media-preview img,
+.edit-media-preview video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.media-file-placeholder {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  padding: 8px;
+  color: #d94262;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+  overflow-wrap: anywhere;
 }
 
 .upload-progress {
@@ -800,25 +857,132 @@ input[type="file"] {
 
 .cancel-btn,
 .edit-actions button[type="button"],
+.create-actions button[type="button"],
 .modal-buttons button[type="button"] {
   background: #f2f4f7;
   color: #344054;
 }
 
 .edit-actions,
+.create-actions,
 .modal-buttons {
   display: flex;
-  justify-content: center;
+  justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;
 }
 
 .edit-actions button,
+.create-actions button,
 .modal-buttons button,
 .cancel-btn,
 button[type="submit"] {
   min-height: 42px;
   padding: 0 18px;
+}
+
+.edit-media-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.edit-media-header label {
+  margin: 0;
+}
+
+.edit-media-header span {
+  color: var(--muted-text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.edit-media-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.edit-media-tile {
+  position: relative;
+  min-width: 0;
+  cursor: grab;
+}
+
+.edit-media-tile.dragging {
+  opacity: 0.62;
+}
+
+.media-remove-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(47, 53, 66, 0.72);
+  color: #fff;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.media-order-controls {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: flex;
+  gap: 5px;
+}
+
+.media-order-controls button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  color: #344054;
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.media-order-controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.edit-media-add {
+  display: grid;
+  min-height: 0;
+  place-items: center;
+  align-content: center;
+  gap: 4px;
+  aspect-ratio: 1 / 1;
+  border: 1px dashed #ff8fa0;
+  border-radius: 10px;
+  background: #fff7fa;
+  color: #d94262;
+  cursor: pointer;
+  font-weight: 800;
+  text-align: center;
+}
+
+.edit-media-add span {
+  font-size: 26px;
+  line-height: 1;
+}
+
+.edit-media-add small {
+  font-size: 12px;
 }
 
 .profile-avatar-edit {
@@ -1078,11 +1242,13 @@ button[type="submit"] {
   }
 
   .edit-actions,
+  .create-actions,
   .modal-buttons {
     flex-direction: column;
   }
 
   .edit-actions button,
+  .create-actions button,
   .modal-buttons button,
   .cancel-btn,
   button[type="submit"] {

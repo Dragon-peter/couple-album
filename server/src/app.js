@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 3001;
 const uploadDir = path.join(__dirname, '../uploads');
 const albumsDataPath = path.join(__dirname, '../../albums.json');
 const usersDataPath = path.join(__dirname, '../../users.json');
+const MAX_ALBUM_FILES = 9;
 
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -120,6 +121,11 @@ function normalizeAlbums(rawAlbums) {
   return rawAlbums.map((album, albumIndex) => ({
     ...album,
     id: album.id || albumIndex + 1,
+    files: (album.files || []).map((file, fileIndex) => ({
+      ...file,
+      id: file.id || fileIndex + 1,
+      sortOrder: Number.isFinite(Number(file.sortOrder)) ? Number(file.sortOrder) : fileIndex,
+    })),
     creator: album.creator || album.creatorName || 'unknown',
     creatorId: album.creatorId || null,
     creatorAccount: album.creatorAccount || '',
@@ -199,6 +205,16 @@ function removeUploadedFile(fileUrl) {
   const filePath = path.join(uploadDir, path.basename(fileUrl));
   if (fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
+  }
+}
+
+function parseJsonField(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
   }
 }
 
@@ -293,7 +309,7 @@ app.put('/api/me', requireAuth, avatarUpload.single('avatar'), (req, res) => {
   res.json({ success: true, user: publicUser(user) });
 });
 
-app.post('/api/album', requireAuth, upload.array('files', 10), (req, res) => {
+app.post('/api/album', requireAuth, upload.array('files', MAX_ALBUM_FILES), (req, res) => {
   const user = findCurrentUser(req);
   if (!user) return res.status(404).json({ success: false, message: '用户不存在' });
 
@@ -308,16 +324,26 @@ app.post('/api/album', requireAuth, upload.array('files', 10), (req, res) => {
   }
 
   const files = (req.files || []).map(file => ({
+    id: 0,
     url: `/uploads/${file.filename}`,
     originalname: file.originalname,
     type: getFileType(file.mimetype),
     mimetype: file.mimetype,
     size: file.size,
+    sortOrder: 0,
   }));
 
   if (!files.length) {
     return res.status(400).json({ success: false, message: '请选择文件' });
   }
+  if (files.length > MAX_ALBUM_FILES) {
+    return res.status(400).json({ success: false, message: `最多只能上传 ${MAX_ALBUM_FILES} 个文件` });
+  }
+
+  files.forEach((file, index) => {
+    file.id = index + 1;
+    file.sortOrder = index;
+  });
 
   const album = {
     id: nextId(albums),
@@ -416,7 +442,7 @@ app.delete('/api/album/:id', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
-app.put('/api/album/:id', requireAuth, (req, res) => {
+app.put('/api/album/:id', requireAuth, upload.array('files', MAX_ALBUM_FILES), (req, res) => {
   const user = findCurrentUser(req);
   const album = albums.find(item => String(item.id) === String(req.params.id));
   const title = normalizeText(req.body.title);
@@ -432,10 +458,87 @@ app.put('/api/album/:id', requireAuth, (req, res) => {
     return res.status(400).json({ success: false, message: '请填写有效的相册信息' });
   }
 
+  let nextAlbumFiles = null;
+  if (req.body.mediaOrder) {
+    const mediaOrder = parseJsonField(req.body.mediaOrder, []);
+    if (!Array.isArray(mediaOrder)) {
+      (req.files || []).forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+      return res.status(400).json({ success: false, message: '图片顺序数据无效' });
+    }
+    if (mediaOrder.length < 1) {
+      (req.files || []).forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+      return res.status(400).json({ success: false, message: '至少保留 1 个文件' });
+    }
+    if (mediaOrder.length > MAX_ALBUM_FILES) {
+      (req.files || []).forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+      return res.status(400).json({ success: false, message: `最多只能保留 ${MAX_ALBUM_FILES} 个文件` });
+    }
+
+    const currentById = new Map((album.files || []).map(file => [String(file.id), file]));
+    const clientIds = Array.isArray(req.body.fileClientIds)
+      ? req.body.fileClientIds.map(String)
+      : req.body.fileClientIds
+        ? [String(req.body.fileClientIds)]
+        : [];
+    const newFileByClientId = new Map((req.files || []).map((file, index) => [clientIds[index], file]));
+    const keptExistingIds = new Set();
+    const usedNewClientIds = new Set();
+    const nextFiles = [];
+
+    for (let index = 0; index < mediaOrder.length; index += 1) {
+      const item = mediaOrder[index];
+      if (item && item.source === 'existing') {
+        const id = String(item.id || '');
+        const existingFile = currentById.get(id);
+        if (!existingFile || keptExistingIds.has(id)) {
+          (req.files || []).forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+          return res.status(400).json({ success: false, message: '图片数据不属于当前相册' });
+        }
+        keptExistingIds.add(id);
+        nextFiles.push({ ...existingFile, sortOrder: index });
+      } else if (item && item.source === 'new') {
+        const clientId = String(item.clientId || '');
+        const uploadFile = newFileByClientId.get(clientId);
+        if (!uploadFile || usedNewClientIds.has(clientId)) {
+          (req.files || []).forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+          return res.status(400).json({ success: false, message: '新增文件数据无效' });
+        }
+        usedNewClientIds.add(clientId);
+        nextFiles.push({
+          id: nextId([...album.files, ...nextFiles]),
+          url: `/uploads/${uploadFile.filename}`,
+          originalname: uploadFile.originalname,
+          type: getFileType(uploadFile.mimetype),
+          mimetype: uploadFile.mimetype,
+          size: uploadFile.size,
+          sortOrder: index,
+        });
+      } else {
+        (req.files || []).forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+        return res.status(400).json({ success: false, message: '图片顺序数据无效' });
+      }
+    }
+    if (usedNewClientIds.size !== (req.files || []).length) {
+      (req.files || []).forEach(file => removeUploadedFile(`/uploads/${file.filename}`));
+      return res.status(400).json({ success: false, message: '新增文件数据无效' });
+    }
+
+    (album.files || [])
+      .filter(file => !keptExistingIds.has(String(file.id)))
+      .forEach(file => {
+        try {
+          removeUploadedFile(file.url);
+        } catch (error) {
+          console.error('删除本地文件失败:', error);
+        }
+      });
+    nextAlbumFiles = nextFiles;
+  }
   album.title = title;
   album.description = description;
   album.category = category;
   album.tags = parseTags(req.body.tags);
+  if (nextAlbumFiles) album.files = nextAlbumFiles;
   saveAlbums();
   res.json({ success: true, album });
 });

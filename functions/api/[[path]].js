@@ -2,6 +2,7 @@ const PASSWORD_PREFIX = 'pbkdf2_sha256';
 const PBKDF2_ITERATIONS = 100000;
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_TOKEN_SECRET = 'couple-album-dev-secret-change-in-production';
+const MAX_ALBUM_FILES = 9;
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status,
@@ -159,6 +160,16 @@ function parseTags(rawTags) {
   }
 }
 
+function parseJsonField(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
 function mapAlbumRows(rows) {
   const byId = new Map();
   rows.forEach((row) => {
@@ -184,11 +195,13 @@ function mapAlbumRows(rows) {
     if (row.file_id && !album.fileIds.has(row.file_id)) {
       album.fileIds.add(row.file_id);
       album.files.push({
+        id: row.file_id,
         url: row.file_url,
         originalname: row.file_originalname,
         type: row.file_type,
         mimetype: row.file_mimetype,
         size: row.file_size,
+        sortOrder: row.file_sort_order || 0,
       });
     }
     if (row.comment_id && !album.commentIds.has(row.comment_id)) {
@@ -214,7 +227,7 @@ async function listAlbums(env) {
     SELECT
       a.*,
       f.id AS file_id, f.url AS file_url, f.originalname AS file_originalname,
-      f.type AS file_type, f.mimetype AS file_mimetype, f.size AS file_size,
+      f.type AS file_type, f.mimetype AS file_mimetype, f.size AS file_size, f.sort_order AS file_sort_order,
       c.id AS comment_id, c.content AS comment_content, c.username AS comment_username,
       c.user_id AS comment_user_id, c.account AS comment_account, c.created_at AS comment_created_at
     FROM albums a
@@ -311,6 +324,7 @@ async function handleAlbumCreate(request, env) {
 
   const files = form.getAll('files').filter((file) => file && typeof file === 'object' && file.size);
   if (!files.length) return json({ success: false, message: '请选择文件' }, 400);
+  if (files.length > MAX_ALBUM_FILES) return json({ success: false, message: `最多只能上传 ${MAX_ALBUM_FILES} 个文件` }, 400);
 
   const createdAt = nowIso();
   const result = await env.DB.prepare(`
@@ -343,17 +357,81 @@ async function handleAlbumUpdate(request, env, albumId) {
   if (!album) return json({ success: false, message: '相册不存在' }, 404);
   if (!isAlbumOwner(album, user)) return json({ success: false, message: '只能修改自己发布的相册' }, 403);
 
-  const body = await request.json();
-  const title = normalizeText(body.title);
-  const description = normalizeText(body.description);
-  const category = normalizeText(body.category);
+  const contentType = request.headers.get('content-type') || '';
+  const isMultipart = contentType.includes('multipart/form-data');
+  const body = isMultipart ? await request.formData() : await request.json();
+  const title = normalizeText(isMultipart ? body.get('title') : body.title);
+  const description = normalizeText(isMultipart ? body.get('description') : body.description);
+  const category = normalizeText(isMultipart ? body.get('category') : body.category);
   if (!title || !description || !category || category === '全部') {
     return json({ success: false, message: '请填写有效的相册信息' }, 400);
   }
 
+  if (isMultipart && body.has('mediaOrder')) {
+    const mediaOrder = parseJsonField(body.get('mediaOrder'), []);
+    if (!Array.isArray(mediaOrder)) return json({ success: false, message: '图片顺序数据无效' }, 400);
+    if (mediaOrder.length < 1) return json({ success: false, message: '至少保留 1 个文件' }, 400);
+    if (mediaOrder.length > MAX_ALBUM_FILES) return json({ success: false, message: `最多只能保留 ${MAX_ALBUM_FILES} 个文件` }, 400);
+
+    const { results: currentFiles = [] } = await env.DB.prepare('SELECT * FROM album_files WHERE album_id = ?').bind(albumId).all();
+    const currentById = new Map(currentFiles.map((file) => [String(file.id), file]));
+    const newFiles = body.getAll('files').filter((file) => file && typeof file === 'object' && file.size);
+    const newClientIds = body.getAll('fileClientIds').map((value) => String(value));
+    const newFileByClientId = new Map(newFiles.map((file, index) => [newClientIds[index], file]));
+    const keptExistingIds = new Set();
+    const usedNewClientIds = new Set();
+
+    for (const item of mediaOrder) {
+      if (item && item.source === 'existing') {
+        const id = String(item.id || '');
+        if (!currentById.has(id) || keptExistingIds.has(id)) return json({ success: false, message: '图片数据不属于当前相册' }, 400);
+        keptExistingIds.add(id);
+      } else if (item && item.source === 'new') {
+        const clientId = String(item.clientId || '');
+        if (!newFileByClientId.has(clientId) || usedNewClientIds.has(clientId)) return json({ success: false, message: '新增文件数据无效' }, 400);
+        usedNewClientIds.add(clientId);
+      } else {
+        return json({ success: false, message: '图片顺序数据无效' }, 400);
+      }
+    }
+    if (usedNewClientIds.size !== newFiles.length) return json({ success: false, message: '新增文件数据无效' }, 400);
+
+    for (let index = 0; index < mediaOrder.length; index += 1) {
+      const item = mediaOrder[index];
+      if (item.source === 'existing') {
+        await env.DB.prepare('UPDATE album_files SET sort_order = ? WHERE id = ? AND album_id = ?')
+          .bind(index, item.id, albumId)
+          .run();
+      } else {
+        const file = newFileByClientId.get(String(item.clientId));
+        const ext = file.name.includes('.') ? file.name.slice(file.name.lastIndexOf('.')) : '';
+        const key = `albums/${albumId}/${Date.now()}-${index}${ext}`;
+        await env.UPLOADS.put(key, file.stream(), {
+          httpMetadata: { contentType: file.type || 'application/octet-stream' },
+          customMetadata: { originalname: file.name || key },
+        });
+        await env.DB.prepare(`
+          INSERT INTO album_files (album_id, url, r2_key, originalname, type, mimetype, size, sort_order)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(albumId, `/uploads/${key}`, key, file.name || key, getFileType(file.type || ''), file.type || '', file.size || 0, index).run();
+      }
+    }
+
+    const removedFiles = currentFiles.filter((file) => !keptExistingIds.has(String(file.id)));
+    if (removedFiles.length) {
+      await env.DB.prepare(`DELETE FROM album_files WHERE album_id = ? AND id IN (${removedFiles.map(() => '?').join(',')})`)
+        .bind(albumId, ...removedFiles.map((file) => file.id))
+        .run();
+      await Promise.all(removedFiles.filter((file) => file.r2_key).map((file) => (
+        env.UPLOADS.delete(file.r2_key).catch((error) => console.error('删除 R2 文件失败:', error))
+      )));
+    }
+  }
+
   await env.DB.prepare('UPDATE albums SET title = ?, description = ?, category = ?, tags_json = ? WHERE id = ?')
-    .bind(title, description, category, JSON.stringify(parseTags(body.tags)), albumId)
+    .bind(title, description, category, JSON.stringify(parseTags(isMultipart ? body.get('tags') : body.tags)), albumId)
     .run();
+
   const albums = await listAlbums(env);
   return json({ success: true, album: albums.find((item) => item.id === albumId) });
 }
