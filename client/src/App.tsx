@@ -4,6 +4,7 @@ import './App.css';
 interface AlbumFile {
   id?: number | string;
   url: string;
+  coverUrl?: string;
   originalname: string;
   type: string;
   mimetype: string;
@@ -45,15 +46,22 @@ interface User {
 }
 
 type LoginMode = 'login' | 'register';
-type EditMediaItem = {
+type MediaItem = {
   key: string;
   source: 'existing' | 'new';
   id?: number | string;
   clientId?: string;
   file?: File;
   previewUrl: string;
+  coverPreviewUrl?: string;
+  coverFile?: File;
   originalname: string;
   type: string;
+};
+type PreviewFile = {
+  url: string;
+  type: string;
+  name: string;
 };
 
 const MAX_ALBUM_FILES = 9;
@@ -90,8 +98,8 @@ function App() {
   const [albums, setAlbums] = useState<Album[]>([]);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [files, setFiles] = useState<File[]>([]);
-  const [previewUrls, setPreviewUrls] = useState<string[]>([]);
+  const [createMediaItems, setCreateMediaItems] = useState<MediaItem[]>([]);
+  const [draggedCreateIndex, setDraggedCreateIndex] = useState<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('全部');
   const [newTag, setNewTag] = useState('');
@@ -114,7 +122,7 @@ function App() {
   const [editCategory, setEditCategory] = useState('');
   const [editTags, setEditTags] = useState<string[]>([]);
   const [editNewTag, setEditNewTag] = useState('');
-  const [editMediaItems, setEditMediaItems] = useState<EditMediaItem[]>([]);
+  const [editMediaItems, setEditMediaItems] = useState<MediaItem[]>([]);
   const [draggedEditIndex, setDraggedEditIndex] = useState<number | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createCategory, setCreateCategory] = useState('日常');
@@ -123,8 +131,7 @@ function App() {
   const [editBio, setEditBio] = useState('');
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [avatarPreview, setAvatarPreview] = useState('');
-  const [previewImg, setPreviewImg] = useState<string | null>(null);
-  const [previewImgName, setPreviewImgName] = useState('');
+  const [previewFile, setPreviewFile] = useState<PreviewFile | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
@@ -151,13 +158,13 @@ function App() {
   }, [albums, selectedAlbum]);
 
   useEffect(() => {
-    if (!previewImg) return;
+    if (!previewFile) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeImagePreview();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [previewImg]);
+  }, [previewFile]);
 
   const fetchAlbums = async () => {
     try {
@@ -262,15 +269,136 @@ function App() {
     return isCommentOwner || isAlbumOwner(album);
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const getMediaType = (file: File) => (
+    file.type.startsWith('video/') ? 'video' : file.type.startsWith('image/') ? 'image' : 'document'
+  );
+
+  const captureVideoCover = (file: File): Promise<File | null> => new Promise(resolve => {
+    if (!file.type.startsWith('video/')) {
+      resolve(null);
+      return;
+    }
+    const video = document.createElement('video');
+    const url = URL.createObjectURL(file);
+    const cleanup = () => URL.revokeObjectURL(url);
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    video.src = url;
+    video.onloadeddata = () => {
+      try {
+        video.currentTime = Math.min(0.1, video.duration || 0);
+      } catch {
+        cleanup();
+        resolve(null);
+      }
+    };
+    video.onseeked = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth || 640;
+        canvas.height = video.videoHeight || 360;
+        const context = canvas.getContext('2d');
+        if (!context) {
+          cleanup();
+          resolve(null);
+          return;
+        }
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(blob => {
+          cleanup();
+          if (!blob) {
+            resolve(null);
+            return;
+          }
+          resolve(new File([blob], `${file.name.replace(/\.[^.]+$/, '')}-cover.jpg`, { type: 'image/jpeg' }));
+        }, 'image/jpeg', 0.82);
+      } catch {
+        cleanup();
+        resolve(null);
+      }
+    };
+    video.onerror = () => {
+      cleanup();
+      resolve(null);
+    };
+  });
+
+  const buildNewMediaItems = async (selectedFiles: File[]): Promise<MediaItem[]> => Promise.all(
+    selectedFiles.map(async (file, index) => {
+      const clientId = `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
+      const type = getMediaType(file);
+      const coverFile = type === 'video' ? await captureVideoCover(file) : null;
+      return {
+        key: `new-${clientId}`,
+        source: 'new' as const,
+        clientId,
+        file,
+        previewUrl: URL.createObjectURL(file),
+        coverFile: coverFile || undefined,
+        coverPreviewUrl: coverFile ? URL.createObjectURL(coverFile) : '',
+        originalname: file.name,
+        type,
+      };
+    }),
+  );
+
+  const addMediaFiles = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    currentCount: number,
+    setItems: React.Dispatch<React.SetStateAction<MediaItem[]>>,
+  ) => {
     const selectedFiles = Array.from(e.target.files || []);
     if (!selectedFiles.length) return;
-    if (selectedFiles.length > MAX_ALBUM_FILES) {
-      alert(`最多只能选择 ${MAX_ALBUM_FILES} 个文件`);
+    const availableSlots = MAX_ALBUM_FILES - currentCount;
+    if (availableSlots <= 0) {
+      alert(`最多只能保留 ${MAX_ALBUM_FILES} 个文件`);
+      e.target.value = '';
+      return;
     }
-    const nextFiles = selectedFiles.slice(0, MAX_ALBUM_FILES);
-    setFiles(nextFiles);
-    setPreviewUrls(nextFiles.map(file => URL.createObjectURL(file)));
+    if (selectedFiles.length > availableSlots) {
+      alert(`最多还能添加 ${availableSlots} 个文件`);
+    }
+    const nextItems = await buildNewMediaItems(selectedFiles.slice(0, availableSlots));
+    setItems(current => [...current, ...nextItems]);
+    e.target.value = '';
+  };
+
+  const moveMediaItem = (
+    setItems: React.Dispatch<React.SetStateAction<MediaItem[]>>,
+    fromIndex: number,
+    toIndex: number,
+  ) => {
+    setItems(current => {
+      if (toIndex < 0 || toIndex >= current.length || fromIndex === toIndex) return current;
+      const next = [...current];
+      const [item] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, item);
+      return next;
+    });
+  };
+
+  const removeMediaItem = (setItems: React.Dispatch<React.SetStateAction<MediaItem[]>>, index: number) => {
+    setItems(current => current.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  const handleMediaCoverChange = (
+    e: React.ChangeEvent<HTMLInputElement>,
+    setItems: React.Dispatch<React.SetStateAction<MediaItem[]>>,
+    index: number,
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      alert('封面只支持图片文件');
+      e.target.value = '';
+      return;
+    }
+    setItems(current => current.map((item, itemIndex) => (
+      itemIndex === index
+        ? { ...item, coverFile: file, coverPreviewUrl: URL.createObjectURL(file) }
+        : item
+    )));
     e.target.value = '';
   };
 
@@ -294,11 +422,11 @@ function App() {
     e.preventDefault();
     if (!requireLogin()) return;
     if (isUploading) return;
-    if (!files.length) {
+    if (!createMediaItems.length) {
       alert('请选择文件');
       return;
     }
-    if (files.length > MAX_ALBUM_FILES) {
+    if (createMediaItems.length > MAX_ALBUM_FILES) {
       alert(`最多只能上传 ${MAX_ALBUM_FILES} 个文件`);
       return;
     }
@@ -308,7 +436,17 @@ function App() {
     formData.append('description', description);
     formData.append('category', createCategory);
     formData.append('tags', JSON.stringify(tags));
-    files.forEach(file => formData.append('files', file));
+    formData.append('mediaOrder', JSON.stringify(createMediaItems.map(item => ({ source: 'new', clientId: item.clientId }))));
+    createMediaItems.forEach(item => {
+      if (item.file && item.clientId) {
+        formData.append('fileClientIds', item.clientId);
+        formData.append('files', item.file);
+      }
+      if (item.type === 'video' && item.coverFile && item.clientId) {
+        formData.append('coverClientIds', item.clientId);
+        formData.append('newCovers', item.coverFile);
+      }
+    });
 
     setIsUploading(true);
     setUploadProgress(0);
@@ -336,8 +474,7 @@ function App() {
       if (data.success) {
         setTitle('');
         setDescription('');
-        setFiles([]);
-        setPreviewUrls([]);
+        setCreateMediaItems([]);
         setTags([]);
         setCreateCategory('日常');
         setShowCreateModal(false);
@@ -459,66 +596,14 @@ function App() {
       source: 'existing',
       id: file.id,
       previewUrl: getFileUrl(file.url),
+      coverPreviewUrl: getFileUrl(file.coverUrl),
       originalname: file.originalname || `媒体 ${index + 1}`,
       type: file.type || (file.mimetype || '').split('/')[0] || 'image',
     })));
   };
 
-  const moveEditMediaItem = (fromIndex: number, toIndex: number) => {
-    setEditMediaItems(current => {
-      if (toIndex < 0 || toIndex >= current.length || fromIndex === toIndex) return current;
-      const next = [...current];
-      const [item] = next.splice(fromIndex, 1);
-      next.splice(toIndex, 0, item);
-      return next;
-    });
-  };
-
-  const handleEditFilesChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFiles = Array.from(e.target.files || []);
-    if (!selectedFiles.length) return;
-    const availableSlots = MAX_ALBUM_FILES - editMediaItems.length;
-    if (availableSlots <= 0) {
-      alert(`最多只能保留 ${MAX_ALBUM_FILES} 个文件`);
-      e.target.value = '';
-      return;
-    }
-    if (selectedFiles.length > availableSlots) {
-      alert(`最多还能添加 ${availableSlots} 个文件`);
-    }
-    const nextItems = selectedFiles.slice(0, availableSlots).map((file, index) => {
-      const clientId = `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
-      return {
-        key: `new-${clientId}`,
-        source: 'new' as const,
-        clientId,
-        file,
-        previewUrl: URL.createObjectURL(file),
-        originalname: file.name,
-        type: file.type.startsWith('video/') ? 'video' : file.type.startsWith('image/') ? 'image' : 'document',
-      };
-    });
-    setEditMediaItems(current => [...current, ...nextItems]);
-    e.target.value = '';
-  };
-
-  const handleRemoveEditMedia = (index: number) => {
-    setEditMediaItems(current => current.filter((_, itemIndex) => itemIndex !== index));
-  };
-
-  const handleEditDragStart = (index: number) => {
-    setDraggedEditIndex(index);
-  };
-
-  const handleEditDragOver = (event: React.DragEvent<HTMLDivElement>, index: number) => {
-    event.preventDefault();
-    if (draggedEditIndex === null || draggedEditIndex === index) return;
-    moveEditMediaItem(draggedEditIndex, index);
-    setDraggedEditIndex(index);
-  };
-
-  const handleEditDragEnd = () => {
-    setDraggedEditIndex(null);
+  const handleEditFilesChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    await addMediaFiles(e, editMediaItems.length, setEditMediaItems);
   };
 
   const handleEditSubmit = async (e: React.FormEvent) => {
@@ -551,6 +636,17 @@ function App() {
           formData.append('files', item.file);
         }
       });
+      editMediaItems.forEach(item => {
+        if (item.type !== 'video' || !item.coverFile) return;
+        if (item.source === 'existing' && item.id) {
+          formData.append('coverExistingIds', String(item.id));
+          formData.append('existingCovers', item.coverFile);
+        }
+        if (item.source === 'new' && item.clientId) {
+          formData.append('coverClientIds', item.clientId);
+          formData.append('newCovers', item.coverFile);
+        }
+      });
 
       const response = await fetch(`${API_BASE_URL}/api/album/${editingAlbum.id}`, {
         method: 'PUT',
@@ -581,24 +677,101 @@ function App() {
   };
 
   const openImagePreview = (file: AlbumFile) => {
-    setPreviewImg(getFileUrl(file.url));
-    setPreviewImgName(file.originalname || 'album-photo');
+    setPreviewFile({
+      url: getFileUrl(file.url),
+      type: file.type || (file.mimetype || '').split('/')[0] || 'image',
+      name: file.originalname || 'album-photo',
+    });
   };
 
   const closeImagePreview = () => {
-    setPreviewImg(null);
-    setPreviewImgName('');
+    setPreviewFile(null);
   };
 
-  const renderMediaPreview = (url: string, type: string, name: string) => {
+  const renderMediaPreview = (url: string, type: string, name: string, coverUrl = '') => {
+    const displayUrl = type === 'video' && coverUrl ? coverUrl : url;
     if (type === 'video') {
-      return <video src={url} muted playsInline />;
+      return (
+        <div className="video-thumb">
+          {coverUrl ? <img src={displayUrl} alt={name} /> : <video src={displayUrl} muted playsInline />}
+          <span className="play-indicator" aria-hidden="true">▶</span>
+        </div>
+      );
     }
     if (type === 'image') {
-      return <img src={url} alt={name} />;
+      return <img src={displayUrl} alt={name} />;
     }
     return <div className="media-file-placeholder">{name.split('.').pop()?.toUpperCase() || 'FILE'}</div>;
   };
+
+  const renderMediaGrid = (
+    items: MediaItem[],
+    setItems: React.Dispatch<React.SetStateAction<MediaItem[]>>,
+    inputId: string,
+    onFilesChange: (e: React.ChangeEvent<HTMLInputElement>) => void,
+    draggedIndex: number | null,
+    setDraggedIndex: React.Dispatch<React.SetStateAction<number | null>>,
+    disabled = false,
+  ) => (
+    <>
+      <div className="edit-media-grid">
+        {items.map((item, index) => (
+          <div
+            key={item.key}
+            className={`edit-media-tile${draggedIndex === index ? ' dragging' : ''}`}
+            draggable={!disabled}
+            onDragStart={() => setDraggedIndex(index)}
+            onDragOver={event => {
+              event.preventDefault();
+              if (disabled || draggedIndex === null || draggedIndex === index) return;
+              moveMediaItem(setItems, draggedIndex, index);
+              setDraggedIndex(index);
+            }}
+            onDragEnd={() => setDraggedIndex(null)}
+          >
+            <div className="edit-media-preview">
+              {renderMediaPreview(item.previewUrl, item.type, item.originalname, item.coverPreviewUrl)}
+            </div>
+            {!disabled && (
+              <>
+                <button type="button" className="media-remove-btn" onClick={() => removeMediaItem(setItems, index)} aria-label="删除文件">
+                  &times;
+                </button>
+                <div className="media-order-controls">
+                  <button type="button" onClick={() => moveMediaItem(setItems, index, index - 1)} disabled={index === 0} aria-label="向前移动">
+                    ‹
+                  </button>
+                  <button type="button" onClick={() => moveMediaItem(setItems, index, index + 1)} disabled={index === items.length - 1} aria-label="向后移动">
+                    ›
+                  </button>
+                </div>
+              </>
+            )}
+            {item.type === 'video' && !disabled && (
+              <>
+                <label className="media-cover-btn" htmlFor={`${inputId}-cover-${item.key}`}>
+                  封面
+                </label>
+                <input
+                  id={`${inputId}-cover-${item.key}`}
+                  type="file"
+                  accept="image/*"
+                  onChange={event => handleMediaCoverChange(event, setItems, index)}
+                />
+              </>
+            )}
+          </div>
+        ))}
+        {items.length < MAX_ALBUM_FILES && !disabled && (
+          <label className="edit-media-add" htmlFor={inputId}>
+            <span>+</span>
+            <small>添加</small>
+          </label>
+        )}
+      </div>
+      <input id={inputId} type="file" multiple accept="image/*,video/*,.pdf,.doc,.docx" onChange={onFilesChange} disabled={disabled} />
+    </>
+  );
 
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -772,13 +945,15 @@ function App() {
             </p>
             <div className={`album-photos${selectedAlbum.files.length === 1 ? ' single' : ''}`}>
               {selectedAlbum.files.map(file => (
-                <img
+                <button
+                  type="button"
                   key={file.url}
-                  src={getFileUrl(file.url)}
-                  alt={file.originalname}
-                  className="album-photo"
+                  className="album-photo detail-media-btn"
                   onClick={() => openImagePreview(file)}
-                />
+                  aria-label={`查看${file.type === 'video' ? '视频' : '图片'} ${file.originalname}`}
+                >
+                  {renderMediaPreview(getFileUrl(file.url), file.type, file.originalname, getFileUrl(file.coverUrl))}
+                </button>
               ))}
             </div>
             {renderComments(selectedAlbum)}
@@ -815,9 +990,11 @@ function App() {
                         key={file.url}
                         className="album-photo-btn"
                         onClick={() => openImagePreview(file)}
-                        aria-label={`查看图片 ${file.originalname}`}
+                        aria-label={`查看${file.type === 'video' ? '视频' : '图片'} ${file.originalname}`}
                       >
-                        <img src={getFileUrl(file.url)} alt={file.originalname} className="album-photo matrix" />
+                        <span className="album-photo matrix">
+                          {renderMediaPreview(getFileUrl(file.url), file.type, file.originalname, getFileUrl(file.coverUrl))}
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -899,20 +1076,35 @@ function App() {
                   </div>
                 </div>
                 <div className="form-group">
-                  <label className={`file-upload-label upload-card${isUploading ? ' disabled' : ''}`} htmlFor="photo-upload">
-                    <span className="upload-card-icon">+</span>
-                    <span>添加照片/视频</span>
-                    <small>最多 {MAX_ALBUM_FILES} 个文件</small>
-                  </label>
-                  <input id="photo-upload" type="file" multiple accept="image/*,video/*,.pdf,.doc,.docx" onChange={handleFileChange} disabled={isUploading} />
-                  {previewUrls.length > 0 && (
-                    <div className="preview-photos">
-                      {previewUrls.map((url, index) => (
-                        <div key={url} className="preview-tile">
-                          {renderMediaPreview(url, files[index]?.type?.startsWith('video/') ? 'video' : files[index]?.type?.startsWith('image/') ? 'image' : 'document', files[index]?.name || `预览 ${index + 1}`)}
-                        </div>
-                      ))}
-                    </div>
+                  <div className="edit-media-header">
+                    <label>相册文件：</label>
+                    <span>{createMediaItems.length}/{MAX_ALBUM_FILES}</span>
+                  </div>
+                  {createMediaItems.length === 0 && (
+                    <label className={`file-upload-label upload-card${isUploading ? ' disabled' : ''}`} htmlFor="photo-upload">
+                      <span className="upload-card-icon">+</span>
+                      <span>添加照片/视频</span>
+                      <small>最多 {MAX_ALBUM_FILES} 个文件，可拖动排序</small>
+                    </label>
+                  )}
+                  {createMediaItems.length > 0 && renderMediaGrid(
+                    createMediaItems,
+                    setCreateMediaItems,
+                    'photo-upload',
+                    event => { void addMediaFiles(event, createMediaItems.length, setCreateMediaItems); },
+                    draggedCreateIndex,
+                    setDraggedCreateIndex,
+                    isUploading,
+                  )}
+                  {createMediaItems.length === 0 && (
+                    <input
+                      id="photo-upload"
+                      type="file"
+                      multiple
+                      accept="image/*,video/*,.pdf,.doc,.docx"
+                      onChange={event => { void addMediaFiles(event, createMediaItems.length, setCreateMediaItems); }}
+                      disabled={isUploading}
+                    />
                   )}
                 </div>
                 {isUploading && (
@@ -983,40 +1175,14 @@ function App() {
                   <label>相册文件：</label>
                   <span>{editMediaItems.length}/{MAX_ALBUM_FILES}</span>
                 </div>
-                <div className="edit-media-grid">
-                  {editMediaItems.map((item, index) => (
-                    <div
-                      key={item.key}
-                      className={`edit-media-tile${draggedEditIndex === index ? ' dragging' : ''}`}
-                      draggable
-                      onDragStart={() => handleEditDragStart(index)}
-                      onDragOver={event => handleEditDragOver(event, index)}
-                      onDragEnd={handleEditDragEnd}
-                    >
-                      <div className="edit-media-preview">
-                        {renderMediaPreview(item.previewUrl, item.type, item.originalname)}
-                      </div>
-                      <button type="button" className="media-remove-btn" onClick={() => handleRemoveEditMedia(index)} aria-label="删除文件">
-                        &times;
-                      </button>
-                      <div className="media-order-controls">
-                        <button type="button" onClick={() => moveEditMediaItem(index, index - 1)} disabled={index === 0} aria-label="向前移动">
-                          ‹
-                        </button>
-                        <button type="button" onClick={() => moveEditMediaItem(index, index + 1)} disabled={index === editMediaItems.length - 1} aria-label="向后移动">
-                          ›
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  {editMediaItems.length < MAX_ALBUM_FILES && (
-                    <label className="edit-media-add" htmlFor="edit-photo-upload">
-                      <span>+</span>
-                      <small>添加</small>
-                    </label>
-                  )}
-                </div>
-                <input id="edit-photo-upload" type="file" multiple accept="image/*,video/*,.pdf,.doc,.docx" onChange={handleEditFilesChange} />
+                {renderMediaGrid(
+                  editMediaItems,
+                  setEditMediaItems,
+                  'edit-photo-upload',
+                  event => { void handleEditFilesChange(event); },
+                  draggedEditIndex,
+                  setDraggedEditIndex,
+                )}
               </div>
               <div className="edit-actions">
                 <button type="submit">保存修改</button>
@@ -1048,14 +1214,20 @@ function App() {
         </div>
       )}
 
-      {previewImg && (
+      {previewFile && (
         <div className="modal image-preview-modal" onClick={closeImagePreview}>
           <div className="image-preview-content" onClick={e => e.stopPropagation()}>
             <button className="image-preview-close" type="button" onClick={closeImagePreview} aria-label="关闭图片预览">
               &times;
             </button>
-            <img src={previewImg} className="modal-img" alt="" />
-            <a className="save-btn" href={previewImg} download={previewImgName || true}>保存图片</a>
+            {previewFile.type === 'video' ? (
+              <video src={previewFile.url} className="modal-img modal-video" controls playsInline />
+            ) : (
+              <img src={previewFile.url} className="modal-img" alt="" />
+            )}
+            <a className="save-btn" href={previewFile.url} download={previewFile.name || true}>
+              {previewFile.type === 'video' ? '保存视频' : '保存图片'}
+            </a>
           </div>
         </div>
       )}

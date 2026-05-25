@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS album_files (
   album_id INTEGER NOT NULL,
   url TEXT NOT NULL,
   r2_key TEXT,
+  cover_url TEXT DEFAULT '',
+  cover_r2_key TEXT,
   originalname TEXT,
   type TEXT,
   mimetype TEXT,

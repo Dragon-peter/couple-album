@@ -170,6 +170,22 @@ function parseJsonField(value, fallback) {
   }
 }
 
+function formFilesByKey(form, fileField, keyField) {
+  const files = form.getAll(fileField).filter((file) => file && typeof file === 'object' && file.size);
+  const keys = form.getAll(keyField).map((value) => String(value));
+  return new Map(files.map((file, index) => [keys[index], file]));
+}
+
+async function uploadR2File(env, file, keyPrefix, index) {
+  const ext = file.name.includes('.') ? file.name.slice(file.name.lastIndexOf('.')) : '';
+  const key = `${keyPrefix}/${Date.now()}-${index}${ext}`;
+  await env.UPLOADS.put(key, file.stream(), {
+    httpMetadata: { contentType: file.type || 'application/octet-stream' },
+    customMetadata: { originalname: file.name || key },
+  });
+  return { key, url: `/uploads/${key}` };
+}
+
 function mapAlbumRows(rows) {
   const byId = new Map();
   rows.forEach((row) => {
@@ -197,6 +213,7 @@ function mapAlbumRows(rows) {
       album.files.push({
         id: row.file_id,
         url: row.file_url,
+        coverUrl: row.file_cover_url || '',
         originalname: row.file_originalname,
         type: row.file_type,
         mimetype: row.file_mimetype,
@@ -227,7 +244,8 @@ async function listAlbums(env) {
     SELECT
       a.*,
       f.id AS file_id, f.url AS file_url, f.originalname AS file_originalname,
-      f.type AS file_type, f.mimetype AS file_mimetype, f.size AS file_size, f.sort_order AS file_sort_order,
+      f.type AS file_type, f.mimetype AS file_mimetype, f.size AS file_size,
+      f.sort_order AS file_sort_order, f.cover_url AS file_cover_url,
       c.id AS comment_id, c.content AS comment_content, c.username AS comment_username,
       c.user_id AS comment_user_id, c.account AS comment_account, c.created_at AS comment_created_at
     FROM albums a
@@ -325,6 +343,25 @@ async function handleAlbumCreate(request, env) {
   const files = form.getAll('files').filter((file) => file && typeof file === 'object' && file.size);
   if (!files.length) return json({ success: false, message: '请选择文件' }, 400);
   if (files.length > MAX_ALBUM_FILES) return json({ success: false, message: `最多只能上传 ${MAX_ALBUM_FILES} 个文件` }, 400);
+  const mediaOrder = parseJsonField(form.get('mediaOrder'), []);
+  const hasMediaOrder = Array.isArray(mediaOrder) && mediaOrder.length > 0;
+  const fileByClientId = formFilesByKey(form, 'files', 'fileClientIds');
+  const coverByClientId = formFilesByKey(form, 'newCovers', 'coverClientIds');
+  const orderedItems = hasMediaOrder ? mediaOrder : files.map((file, index) => ({ source: 'new', clientId: `legacy-${index}`, file }));
+  if (orderedItems.length !== files.length || orderedItems.length > MAX_ALBUM_FILES) {
+    return json({ success: false, message: `最多只能上传 ${MAX_ALBUM_FILES} 个文件` }, 400);
+  }
+  const usedCreateClientIds = new Set();
+  for (const item of orderedItems) {
+    if (!item || item.source !== 'new') return json({ success: false, message: '新增文件数据无效' }, 400);
+    if (hasMediaOrder) {
+      const clientId = String(item.clientId || '');
+      if (!fileByClientId.has(clientId) || usedCreateClientIds.has(clientId)) {
+        return json({ success: false, message: '新增文件数据无效' }, 400);
+      }
+      usedCreateClientIds.add(clientId);
+    }
+  }
 
   const createdAt = nowIso();
   const result = await env.DB.prepare(`
@@ -333,18 +370,17 @@ async function handleAlbumCreate(request, env) {
   `).bind(title, description, createdAt, user.name, user.id, user.account, category, JSON.stringify(parseTags(form.get('tags')))).run();
   const albumId = result.meta.last_row_id;
 
-  for (let index = 0; index < files.length; index += 1) {
-    const file = files[index];
-    const ext = file.name.includes('.') ? file.name.slice(file.name.lastIndexOf('.')) : '';
-    const key = `albums/${albumId}/${Date.now()}-${index}${ext}`;
-    await env.UPLOADS.put(key, file.stream(), {
-      httpMetadata: { contentType: file.type || 'application/octet-stream' },
-      customMetadata: { originalname: file.name || key },
-    });
+  for (let index = 0; index < orderedItems.length; index += 1) {
+    const item = orderedItems[index];
+    const file = hasMediaOrder ? fileByClientId.get(String(item.clientId || '')) : item.file;
+    if (!file) return json({ success: false, message: '新增文件数据无效' }, 400);
+    const uploaded = await uploadR2File(env, file, `albums/${albumId}`, index);
+    const cover = hasMediaOrder ? coverByClientId.get(String(item.clientId || '')) : null;
+    const uploadedCover = cover ? await uploadR2File(env, cover, `album-covers/${albumId}`, index) : { key: '', url: '' };
     await env.DB.prepare(`
-      INSERT INTO album_files (album_id, url, r2_key, originalname, type, mimetype, size, sort_order)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(albumId, `/uploads/${key}`, key, file.name || key, getFileType(file.type || ''), file.type || '', file.size || 0, index).run();
+      INSERT INTO album_files (album_id, url, r2_key, cover_url, cover_r2_key, originalname, type, mimetype, size, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(albumId, uploaded.url, uploaded.key, uploadedCover.url, uploadedCover.key, file.name || uploaded.key, getFileType(file.type || ''), file.type || '', file.size || 0, index).run();
   }
 
   const albums = await listAlbums(env);
@@ -378,6 +414,8 @@ async function handleAlbumUpdate(request, env, albumId) {
     const newFiles = body.getAll('files').filter((file) => file && typeof file === 'object' && file.size);
     const newClientIds = body.getAll('fileClientIds').map((value) => String(value));
     const newFileByClientId = new Map(newFiles.map((file, index) => [newClientIds[index], file]));
+    const coverByClientId = formFilesByKey(body, 'newCovers', 'coverClientIds');
+    const coverByExistingId = formFilesByKey(body, 'existingCovers', 'coverExistingIds');
     const keptExistingIds = new Set();
     const usedNewClientIds = new Set();
 
@@ -399,21 +437,30 @@ async function handleAlbumUpdate(request, env, albumId) {
     for (let index = 0; index < mediaOrder.length; index += 1) {
       const item = mediaOrder[index];
       if (item.source === 'existing') {
+        const currentFile = currentById.get(String(item.id));
+        const cover = coverByExistingId.get(String(item.id));
+        if (cover) {
+          const uploadedCover = await uploadR2File(env, cover, `album-covers/${albumId}`, index);
+          await env.DB.prepare('UPDATE album_files SET sort_order = ?, cover_url = ?, cover_r2_key = ? WHERE id = ? AND album_id = ?')
+            .bind(index, uploadedCover.url, uploadedCover.key, item.id, albumId)
+            .run();
+          if (currentFile.cover_r2_key) {
+            env.UPLOADS.delete(currentFile.cover_r2_key).catch((error) => console.error('删除旧封面失败:', error));
+          }
+        } else {
         await env.DB.prepare('UPDATE album_files SET sort_order = ? WHERE id = ? AND album_id = ?')
           .bind(index, item.id, albumId)
           .run();
+        }
       } else {
         const file = newFileByClientId.get(String(item.clientId));
-        const ext = file.name.includes('.') ? file.name.slice(file.name.lastIndexOf('.')) : '';
-        const key = `albums/${albumId}/${Date.now()}-${index}${ext}`;
-        await env.UPLOADS.put(key, file.stream(), {
-          httpMetadata: { contentType: file.type || 'application/octet-stream' },
-          customMetadata: { originalname: file.name || key },
-        });
+        const uploaded = await uploadR2File(env, file, `albums/${albumId}`, index);
+        const cover = coverByClientId.get(String(item.clientId));
+        const uploadedCover = cover ? await uploadR2File(env, cover, `album-covers/${albumId}`, index) : { key: '', url: '' };
         await env.DB.prepare(`
-          INSERT INTO album_files (album_id, url, r2_key, originalname, type, mimetype, size, sort_order)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).bind(albumId, `/uploads/${key}`, key, file.name || key, getFileType(file.type || ''), file.type || '', file.size || 0, index).run();
+          INSERT INTO album_files (album_id, url, r2_key, cover_url, cover_r2_key, originalname, type, mimetype, size, sort_order)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(albumId, uploaded.url, uploaded.key, uploadedCover.url, uploadedCover.key, file.name || uploaded.key, getFileType(file.type || ''), file.type || '', file.size || 0, index).run();
       }
     }
 
@@ -422,8 +469,8 @@ async function handleAlbumUpdate(request, env, albumId) {
       await env.DB.prepare(`DELETE FROM album_files WHERE album_id = ? AND id IN (${removedFiles.map(() => '?').join(',')})`)
         .bind(albumId, ...removedFiles.map((file) => file.id))
         .run();
-      await Promise.all(removedFiles.filter((file) => file.r2_key).map((file) => (
-        env.UPLOADS.delete(file.r2_key).catch((error) => console.error('删除 R2 文件失败:', error))
+      await Promise.all(removedFiles.flatMap((file) => [file.r2_key, file.cover_r2_key]).filter(Boolean).map((key) => (
+        env.UPLOADS.delete(key).catch((error) => console.error('删除 R2 文件失败:', error))
       )));
     }
   }
@@ -442,8 +489,8 @@ async function handleAlbumDelete(request, env, albumId) {
   if (!album) return json({ success: false, message: '相册不存在' }, 404);
   if (!isAlbumOwner(album, user)) return json({ success: false, message: '只能删除自己发布的相册' }, 403);
 
-  const { results } = await env.DB.prepare('SELECT r2_key FROM album_files WHERE album_id = ?').bind(albumId).all();
-  await Promise.all((results || []).filter((file) => file.r2_key).map((file) => env.UPLOADS.delete(file.r2_key)));
+  const { results } = await env.DB.prepare('SELECT r2_key, cover_r2_key FROM album_files WHERE album_id = ?').bind(albumId).all();
+  await Promise.all((results || []).flatMap((file) => [file.r2_key, file.cover_r2_key]).filter(Boolean).map((key) => env.UPLOADS.delete(key)));
   await env.DB.prepare('DELETE FROM albums WHERE id = ?').bind(albumId).run();
   return json({ success: true });
 }
