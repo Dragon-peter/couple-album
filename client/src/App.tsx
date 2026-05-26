@@ -62,6 +62,8 @@ type MediaItem = {
   liveVideoPreviewUrl?: string;
   liveVideoFile?: File;
   liveType?: string;
+  livePairMethod?: 'name' | 'frame';
+  livePairScore?: number;
   originalname: string;
   type: string;
 };
@@ -74,6 +76,9 @@ type PreviewFile = {
 };
 
 const MAX_ALBUM_FILES = 9;
+const LIVE_FRAME_SAMPLE_SIZE = 64;
+const LIVE_AVERAGE_DIFF_THRESHOLD = 0.18;
+const LIVE_HASH_DISTANCE_THRESHOLD = 12;
 
 function resolveApiBaseUrl(): string {
   const envUrl = process.env.REACT_APP_API_URL;
@@ -143,6 +148,7 @@ function App() {
   const [previewFile, setPreviewFile] = useState<PreviewFile | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [showBackToTop, setShowBackToTop] = useState(false);
 
   const authHeaders = useMemo(() => ({
     Authorization: `Bearer ${token}`,
@@ -174,6 +180,13 @@ function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [previewFile]);
+
+  useEffect(() => {
+    const handleScroll = () => setShowBackToTop(window.scrollY > 360);
+    handleScroll();
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
 
   const fetchAlbums = async () => {
     try {
@@ -344,59 +357,219 @@ function App() {
     };
   });
 
+  const drawToFrameSignature = (source: CanvasImageSource) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = LIVE_FRAME_SAMPLE_SIZE;
+    canvas.height = LIVE_FRAME_SAMPLE_SIZE;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) return null;
+    context.drawImage(source, 0, 0, LIVE_FRAME_SAMPLE_SIZE, LIVE_FRAME_SAMPLE_SIZE);
+    const pixels = context.getImageData(0, 0, LIVE_FRAME_SAMPLE_SIZE, LIVE_FRAME_SAMPLE_SIZE).data;
+    const grayscale: number[] = [];
+    let total = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const value = pixels[index] * 0.299 + pixels[index + 1] * 0.587 + pixels[index + 2] * 0.114;
+      grayscale.push(value);
+      total += value;
+    }
+    const average = total / grayscale.length;
+    const hash = grayscale.map(value => value >= average);
+    return { pixels, hash };
+  };
+
+  const getImageSignature = async (file: File) => {
+    try {
+      if ('createImageBitmap' in window) {
+        const bitmap = await createImageBitmap(file);
+        const signature = drawToFrameSignature(bitmap);
+        bitmap.close();
+        if (signature) return signature;
+      }
+    } catch {
+      // Some desktop browsers still cannot decode HEIC; fall back below when possible.
+    }
+
+    return new Promise<ReturnType<typeof drawToFrameSignature>>(resolve => {
+      const image = new Image();
+      const url = URL.createObjectURL(file);
+      const cleanup = () => URL.revokeObjectURL(url);
+      image.onload = () => {
+        const signature = drawToFrameSignature(image);
+        cleanup();
+        resolve(signature);
+      };
+      image.onerror = () => {
+        cleanup();
+        resolve(null);
+      };
+      image.src = url;
+    });
+  };
+
+  const getVideoFrameSignature = (file: File) => new Promise<ReturnType<typeof drawToFrameSignature>>(resolve => {
+    const video = document.createElement('video');
+    const url = URL.createObjectURL(file);
+    const cleanup = () => URL.revokeObjectURL(url);
+    let resolved = false;
+    const finish = (signature: ReturnType<typeof drawToFrameSignature>) => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      resolve(signature);
+    };
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    video.src = url;
+    video.onloadeddata = () => {
+      try {
+        video.currentTime = Math.min(0.1, video.duration || 0);
+      } catch {
+        finish(drawToFrameSignature(video));
+      }
+    };
+    video.onseeked = () => finish(drawToFrameSignature(video));
+    video.onerror = () => finish(null);
+  });
+
+  const compareFrameSignatures = (
+    imageSignature: NonNullable<Awaited<ReturnType<typeof getImageSignature>>>,
+    videoSignature: NonNullable<Awaited<ReturnType<typeof getVideoFrameSignature>>>,
+  ) => {
+    let diff = 0;
+    let hashDistance = 0;
+    for (let index = 0; index < imageSignature.pixels.length; index += 4) {
+      diff += Math.abs(imageSignature.pixels[index] - videoSignature.pixels[index]);
+      diff += Math.abs(imageSignature.pixels[index + 1] - videoSignature.pixels[index + 1]);
+      diff += Math.abs(imageSignature.pixels[index + 2] - videoSignature.pixels[index + 2]);
+    }
+    for (let index = 0; index < imageSignature.hash.length; index += 1) {
+      if (imageSignature.hash[index] !== videoSignature.hash[index]) hashDistance += 1;
+    }
+    const averageDiff = diff / (LIVE_FRAME_SAMPLE_SIZE * LIVE_FRAME_SAMPLE_SIZE * 3 * 255);
+    return {
+      averageDiff,
+      hashDistance,
+      score: averageDiff + hashDistance / imageSignature.hash.length,
+      isMatch: averageDiff <= LIVE_AVERAGE_DIFF_THRESHOLD || hashDistance <= LIVE_HASH_DISTANCE_THRESHOLD,
+    };
+  };
+
   const createMediaItemFromFile = async (
     file: File,
     index: number,
     liveVideoFile?: File,
+    livePairMethod?: 'name' | 'frame',
+    livePairScore?: number,
   ): Promise<MediaItem> => {
     const clientId = `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
-      const type = getMediaType(file);
-      const coverFile = type === 'video' && !liveVideoFile ? await captureVideoCover(file) : null;
-      return {
-        key: `new-${clientId}`,
-        source: 'new',
-        clientId,
-        file,
-        previewUrl: URL.createObjectURL(file),
-        coverFile: coverFile || undefined,
-        coverPreviewUrl: coverFile ? URL.createObjectURL(coverFile) : '',
-        isLive: Boolean(liveVideoFile),
-        liveVideoFile,
-        liveVideoPreviewUrl: liveVideoFile ? URL.createObjectURL(liveVideoFile) : '',
-        liveType: liveVideoFile ? 'apple-live-photo-pair' : '',
-        originalname: file.name,
-        type,
-      };
+    const type = getMediaType(file);
+    const coverFile = type === 'video' && !liveVideoFile ? await captureVideoCover(file) : null;
+    return {
+      key: `new-${clientId}`,
+      source: 'new',
+      clientId,
+      file,
+      previewUrl: URL.createObjectURL(file),
+      coverFile: coverFile || undefined,
+      coverPreviewUrl: coverFile ? URL.createObjectURL(coverFile) : '',
+      isLive: Boolean(liveVideoFile),
+      liveVideoFile,
+      liveVideoPreviewUrl: liveVideoFile ? URL.createObjectURL(liveVideoFile) : '',
+      liveType: liveVideoFile ? 'apple-live-photo-pair' : '',
+      livePairMethod,
+      livePairScore,
+      originalname: file.name,
+      type,
+    };
   };
 
   const buildNewMediaItems = async (selectedFiles: File[]): Promise<MediaItem[]> => {
-    const grouped = new Map<string, { images: File[]; videos: File[]; others: File[] }>();
-    selectedFiles.forEach(file => {
-      const stem = getFileStem(file.name);
-      const group = grouped.get(stem) || { images: [], videos: [], others: [] };
-      if (isImageFile(file)) group.images.push(file);
-      else if (isVideoFile(file)) group.videos.push(file);
-      else group.others.push(file);
-      grouped.set(stem, group);
+    type MediaCandidate = { file: File; originalIndex: number };
+    type OrderedFile = { file: File; originalIndex: number; liveVideoFile?: File; livePairMethod?: 'name' | 'frame'; livePairScore?: number };
+
+    const images: MediaCandidate[] = [];
+    const videos: MediaCandidate[] = [];
+    const others: MediaCandidate[] = [];
+    selectedFiles.forEach((file, originalIndex) => {
+      if (isImageFile(file)) images.push({ file, originalIndex });
+      else if (isVideoFile(file)) videos.push({ file, originalIndex });
+      else others.push({ file, originalIndex });
     });
 
-    const orderedFiles: Array<{ file: File; liveVideoFile?: File }> = [];
-    grouped.forEach(group => {
-      const [firstImage, ...extraImages] = group.images;
-      const [firstVideo, ...extraVideos] = group.videos;
-      if (firstImage && firstVideo) {
-        orderedFiles.push({ file: firstImage, liveVideoFile: firstVideo });
-      } else if (firstImage) {
-        orderedFiles.push({ file: firstImage });
-      } else if (firstVideo) {
-        orderedFiles.push({ file: firstVideo });
+    const pairedImageIndexes = new Set<number>();
+    const pairedVideoIndexes = new Set<number>();
+    const orderedFiles: OrderedFile[] = [];
+
+    images.forEach(image => {
+      const matchingVideo = videos.find(video => (
+        !pairedVideoIndexes.has(video.originalIndex)
+        && getFileStem(video.file.name) === getFileStem(image.file.name)
+      ));
+      if (matchingVideo) {
+        pairedImageIndexes.add(image.originalIndex);
+        pairedVideoIndexes.add(matchingVideo.originalIndex);
+        orderedFiles.push({
+          file: image.file,
+          originalIndex: Math.min(image.originalIndex, matchingVideo.originalIndex),
+          liveVideoFile: matchingVideo.file,
+          livePairMethod: 'name',
+          livePairScore: 0,
+        });
       }
-      extraImages.forEach(file => orderedFiles.push({ file }));
-      extraVideos.forEach(file => orderedFiles.push({ file }));
-      group.others.forEach(file => orderedFiles.push({ file }));
     });
 
-    return Promise.all(orderedFiles.map((item, index) => createMediaItemFromFile(item.file, index, item.liveVideoFile)));
+    const remainingImages = images.filter(image => !pairedImageIndexes.has(image.originalIndex));
+    const remainingVideos = videos.filter(video => !pairedVideoIndexes.has(video.originalIndex));
+    if (remainingImages.length && remainingVideos.length) {
+      const imageSignatures = new Map<number, NonNullable<Awaited<ReturnType<typeof getImageSignature>>>>();
+      const videoSignatures = new Map<number, NonNullable<Awaited<ReturnType<typeof getVideoFrameSignature>>>>();
+      await Promise.all(remainingImages.map(async image => {
+        const signature = await getImageSignature(image.file);
+        if (signature) imageSignatures.set(image.originalIndex, signature);
+      }));
+      await Promise.all(remainingVideos.map(async video => {
+        const signature = await getVideoFrameSignature(video.file);
+        if (signature) videoSignatures.set(video.originalIndex, signature);
+      }));
+
+      const frameMatches = remainingImages.flatMap(image => {
+        const imageSignature = imageSignatures.get(image.originalIndex);
+        if (!imageSignature) return [];
+        return remainingVideos.flatMap(video => {
+          const videoSignature = videoSignatures.get(video.originalIndex);
+          if (!videoSignature) return [];
+          const comparison = compareFrameSignatures(imageSignature, videoSignature);
+          return comparison.isMatch ? [{ image, video, ...comparison }] : [];
+        });
+      }).sort((a, b) => a.score - b.score);
+
+      frameMatches.forEach(match => {
+        if (pairedImageIndexes.has(match.image.originalIndex) || pairedVideoIndexes.has(match.video.originalIndex)) return;
+        pairedImageIndexes.add(match.image.originalIndex);
+        pairedVideoIndexes.add(match.video.originalIndex);
+        orderedFiles.push({
+          file: match.image.file,
+          originalIndex: Math.min(match.image.originalIndex, match.video.originalIndex),
+          liveVideoFile: match.video.file,
+          livePairMethod: 'frame',
+          livePairScore: match.score,
+        });
+      });
+    }
+
+    images
+      .filter(image => !pairedImageIndexes.has(image.originalIndex))
+      .forEach(image => orderedFiles.push({ file: image.file, originalIndex: image.originalIndex }));
+    videos
+      .filter(video => !pairedVideoIndexes.has(video.originalIndex))
+      .forEach(video => orderedFiles.push({ file: video.file, originalIndex: video.originalIndex }));
+    others.forEach(file => orderedFiles.push({ file: file.file, originalIndex: file.originalIndex }));
+
+    orderedFiles.sort((a, b) => a.originalIndex - b.originalIndex);
+    return Promise.all(orderedFiles.map((item, index) => (
+      createMediaItemFromFile(item.file, index, item.liveVideoFile, item.livePairMethod, item.livePairScore)
+    )));
   };
 
   const addMediaFiles = async (
@@ -764,6 +937,10 @@ function App() {
     setPreviewFile(null);
   };
 
+  const scrollToTop = () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const renderMediaPreview = (url: string, type: string, name: string, coverUrl = '', liveVideoUrl = '', isLive = false) => {
     if (isLive && liveVideoUrl) {
       return (
@@ -787,6 +964,20 @@ function App() {
       return <img src={displayUrl} alt={name} />;
     }
     return <div className="media-file-placeholder">{name.split('.').pop()?.toUpperCase() || 'FILE'}</div>;
+  };
+
+  const renderMediaPairHint = (items: MediaItem[], mode: 'create' | 'edit') => {
+    const liveCount = items.filter(item => item.isLive).length;
+    const framePairCount = items.filter(item => item.livePairMethod === 'frame').length;
+    const ordinaryVideoCount = items.filter(item => item.type === 'video' && !item.isLive).length;
+    if (!liveCount && !ordinaryVideoCount) return null;
+    const parts = [];
+    if (liveCount) {
+      parts.push(`${mode === 'create' ? '已自动配对' : '已识别'} ${liveCount} 个 Live 图`);
+    }
+    if (framePairCount) parts.push(`${framePairCount} 个通过画面相似配对`);
+    if (ordinaryVideoCount) parts.push(`${ordinaryVideoCount} 个视频将作为普通视频上传`);
+    return <p className="live-pair-hint">{parts.join('，')}</p>;
   };
 
   const renderMediaGrid = (
@@ -1165,9 +1356,7 @@ function App() {
                     <label>相册文件：</label>
                     <span>{createMediaItems.length}/{MAX_ALBUM_FILES}</span>
                   </div>
-                  {createMediaItems.some(item => item.isLive) && (
-                    <p className="live-pair-hint">已自动配对 {createMediaItems.filter(item => item.isLive).length} 个 Live 图</p>
-                  )}
+                  {renderMediaPairHint(createMediaItems, 'create')}
                   {createMediaItems.length === 0 && (
                     <label className={`file-upload-label upload-card${isUploading ? ' disabled' : ''}`} htmlFor="photo-upload">
                       <span className="upload-card-icon">+</span>
@@ -1263,9 +1452,7 @@ function App() {
                   <label>相册文件：</label>
                   <span>{editMediaItems.length}/{MAX_ALBUM_FILES}</span>
                 </div>
-                {editMediaItems.some(item => item.isLive) && (
-                  <p className="live-pair-hint">已识别 {editMediaItems.filter(item => item.isLive).length} 个 Live 图</p>
-                )}
+                {renderMediaPairHint(editMediaItems, 'edit')}
                 {renderMediaGrid(
                   editMediaItems,
                   setEditMediaItems,
@@ -1330,6 +1517,11 @@ function App() {
             </div>
           </div>
         </div>
+      )}
+      {showBackToTop && !showCreateModal && !editingAlbum && !isEditProfileModalOpen && !previewFile && !isLoginModalOpen && (
+        <button type="button" className="back-to-top" onClick={scrollToTop} aria-label="回到顶部" title="回到顶部">
+          ↑
+        </button>
       )}
     </div>
   );
